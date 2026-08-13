@@ -46,9 +46,17 @@ supersedes its scope with the additions below.
       MinIO/Postgres services (docker-compose)
 
 ## 2. API layer
-- [ ] Decouple a FastAPI backend from the Streamlit UI — expose EDA/preprocessing/modeling/
-      clustering as REST endpoints, reading from the warehouse table instead of local files;
-      Streamlit becomes one client, not the whole app
+- [x] Expose EDA/preprocessing/modeling/clustering as REST endpoints, reading from the warehouse
+      table instead of local files — `api/` (FastAPI): `datasets` (ingest via the ETL pipeline:
+      generate/upload/kaggle + clean, list, data), `eda`, `modeling` (regression/classification +
+      model download), `clustering` (+ 2D projection), `comparison` (winner-selection, shared with
+      `pages/4_Comparison.py` via the new `utils/comparison.py`). Verified end-to-end with real
+      HTTP requests against live MinIO/Postgres for every endpoint, including the data-quality
+      failure path (422) and 404s for unknown datasets.
+- [ ] Decouple the FastAPI backend from the Streamlit UI — Streamlit becomes one client, not the
+      whole app. Not done yet: the app still calls `utils/*` directly; this is the explicit
+      follow-up (deferred deliberately to avoid a large, regression-risky rewrite of ~1300 lines
+      of working, interactive UI code in the same pass as building the backend — see log.md)
 
 ## 3. Testing
 - [ ] pytest suite for `utils/preprocessing.py`, `utils/modeling.py`, `utils/generators.py`, and

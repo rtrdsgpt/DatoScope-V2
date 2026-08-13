@@ -1,7 +1,7 @@
 """
-Load stage — writes validated, processed data into the Postgres warehouse
-so the (future) FastAPI backend reads from a queryable table instead of
-flat files.
+Load stage — writes validated, processed data into the Postgres warehouse,
+and the read-back functions the FastAPI backend (api/) uses instead of
+touching flat files.
 
 Each dataset gets its own table (schemas vary too widely across generated /
 uploaded / Kaggle datasets to share one wide table); a shared `etl_runs`
@@ -101,3 +101,69 @@ def load_to_warehouse(
         )
 
     return {"table_name": table_name, "dataset_name": dataset_name, "run_id": run_id, "n_rows": len(out)}
+
+
+class DatasetNotFoundError(Exception):
+    pass
+
+
+def list_datasets(engine: Engine | None = None) -> list[dict]:
+    """One row per dataset, summarizing its most recent run."""
+    engine = engine or get_engine()
+    with engine.begin() as conn:
+        conn.execute(text(_CREATE_REGISTRY_SQL))
+        rows = conn.execute(
+            text(
+                f"""
+                SELECT DISTINCT ON (dataset_name)
+                    dataset_name, run_id, table_name, source, n_rows, n_cols, loaded_at
+                FROM {_REGISTRY_TABLE}
+                ORDER BY dataset_name, loaded_at DESC
+                """
+            )
+        ).mappings().all()
+    return [dict(r) for r in rows]
+
+
+def list_runs(dataset_name: str, engine: Engine | None = None) -> list[dict]:
+    engine = engine or get_engine()
+    with engine.begin() as conn:
+        conn.execute(text(_CREATE_REGISTRY_SQL))
+        rows = conn.execute(
+            text(
+                f"""
+                SELECT dataset_name, run_id, table_name, source, n_rows, n_cols, loaded_at
+                FROM {_REGISTRY_TABLE}
+                WHERE dataset_name = :dataset_name
+                ORDER BY loaded_at DESC
+                """
+            ),
+            {"dataset_name": dataset_name},
+        ).mappings().all()
+    return [dict(r) for r in rows]
+
+
+def get_run(dataset_name: str, run_id: str | None = None, engine: Engine | None = None) -> dict:
+    """Look up a run's registry row; falls back to the most recent run when run_id is omitted."""
+    runs = list_runs(dataset_name, engine=engine)
+    if not runs:
+        raise DatasetNotFoundError(f"No warehouse data for dataset '{dataset_name}'")
+    if run_id is None:
+        return runs[0]
+    for run in runs:
+        if run["run_id"] == run_id:
+            return run
+    raise DatasetNotFoundError(f"No run '{run_id}' for dataset '{dataset_name}'")
+
+
+def get_dataset(dataset_name: str, run_id: str | None = None, engine: Engine | None = None) -> pd.DataFrame:
+    """Read a dataset's data back out of its warehouse table (latest run by default)."""
+    engine = engine or get_engine()
+    run = get_run(dataset_name, run_id, engine=engine)
+    with engine.begin() as conn:
+        df = pd.read_sql(
+            text(f'SELECT * FROM "{run["table_name"]}" WHERE _run_id = :run_id'),
+            conn,
+            params={"run_id": run["run_id"]},
+        )
+    return df.drop(columns=["_run_id", "_loaded_at"])

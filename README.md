@@ -91,6 +91,16 @@ DatoScope/
 │   ├── validate.py
 │   ├── load.py
 │   └── pipeline.py
+├── api/
+│   ├── main.py
+│   ├── schemas.py
+│   ├── serialization.py
+│   └── routers/
+│       ├── datasets.py
+│       ├── eda.py
+│       ├── modeling.py
+│       ├── clustering.py
+│       └── comparison.py
 ├── airflow/
 │   └── dags/
 │       └── datoscope_etl_dag.py
@@ -164,6 +174,31 @@ docker compose up -d                 # brings up MinIO, warehouse, and Airflow (
 # or run/validate the DAG directly without the webserver:
 docker compose run --rm airflow-init -c "airflow dags test datoscope_etl_dag $(date +%F)"
 ```
+
+## API
+
+`api/` is a FastAPI backend exposing dataset ingestion, EDA, preprocessing, modeling, and
+clustering as REST endpoints, reading from the Postgres warehouse (via `etl/load.py`) instead of
+local files. It currently runs alongside the Streamlit app rather than being called by it —
+Streamlit still uses `utils/*` directly for now; wiring Streamlit to call this API instead is a
+follow-up pass (see `todo.md` section 2).
+
+```bash
+docker compose up -d minio warehouse
+uvicorn api.main:app --reload   # docs at http://localhost:8000/docs
+```
+
+Typical flow: `POST /datasets/generate` (or `/upload`, `/kaggle`) lands raw data and returns a
+`run_id`, then `POST /datasets/{name}/clean` transforms + validates + loads it into the warehouse
+(same as the ETL pipeline's stages). From there:
+
+- `GET /eda/{name}/summary|missing|distributions|boxplot|qq|correlation|variance` — EDA stats
+- `POST /modeling/{name}/regression|classification` — train/evaluate, returns metrics + a
+  `model_id`; `GET /modeling/download/{model_id}` returns the fitted model as a `.pkl`
+- `POST /clustering/{name}` — train/evaluate KMeans/DBSCAN/Hierarchical + a 2D projection for
+  plotting
+- `POST /comparison/regression|classification|clustering` — stateless winner-selection over a set
+  of already-computed model metrics (same scoring logic as `pages/4_Comparison.py`)
 
 ## Supported File Types
 

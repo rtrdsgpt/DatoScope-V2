@@ -141,3 +141,88 @@ data (Kaggle). Pushed to `main`.
 
 **Housekeeping:** `airflow/logs/` added to `.gitignore` (runtime artifacts from the `dags test`
 run); `.env`/`.env.example` set up so `KAGGLE_API_TOKEN` never risks being committed.
+
+---
+
+## Section 2 — API layer
+
+**Progress:** `api/` (FastAPI) built and verified end-to-end against live MinIO/Postgres — every
+router (datasets, eda, modeling, clustering, comparison) exercised with real HTTP requests over
+real generated/uploaded/Kaggle data, not just written and assumed correct.
+
+**Decisions**
+- **Scoped to "backend first, verified standalone" rather than a full Streamlit rewire in the same
+  pass** — user's explicit choice over doing both at once. `utils/modeling.py`'s results contain
+  trained sklearn objects, confusion matrices, and raw prediction arrays (none directly
+  JSON-serializable), and the 4 Streamlit pages (~1300 lines) are tightly built around
+  `st.session_state`. Rewiring all of that to be a pure HTTP client in the same pass as designing
+  the backend's contracts was assessed as high regression-risk for currently-working UI; todo.md
+  section 2 is now split into two checkboxes (backend done, Streamlit-as-client deferred) rather
+  than one, to track this honestly instead of overclaiming.
+- **Ingestion split into two calls, mirroring the ETL stages**: `POST /datasets/{generate,upload,
+  kaggle}` does extract only (lands raw, returns a `run_id`); `POST /datasets/{name}/clean` does
+  transform + validate + load. This lets a client preview a raw extract under different cleaning
+  parameters before committing one to the warehouse — the same "adjust options, see a live
+  estimate, then commit" shape the current Streamlit sidebar already has (`estimate_outlier_
+  removal` before the "Clean & Preprocess" button) — rather than forcing cleaning params to be
+  chosen blind at extract time.
+- **One warehouse table per dataset stays the read path too** (not just write, from section 1) —
+  added `get_dataset`/`list_datasets`/`list_runs`/`get_run` to `etl/load.py` rather than a new
+  module, since it already owns the engine/table-naming logic and reading back is the natural
+  complement to writing.
+- **Raw-run lookup by dataset_name alone** (`etl/extract.find_raw_run`) — the API's `/clean`
+  endpoint takes a `dataset_name` without requiring the caller to know which of the three sources
+  (generated/uploaded/kaggle) produced it. Implemented by listing S3 keys under all three
+  `raw/<source>/<dataset_name>/` prefixes and taking the lexicographically-max run_id — safe
+  because `run_id` is a sortable UTC timestamp string by construction (section 1).
+- **EDA endpoints return data, not plots** — `pages/1_EDA.py`'s Plotly rendering stays a Streamlit
+  concern; the API returns the underlying numbers (histogram bin edges/counts, box-plot quartiles,
+  Q-Q plot points, correlation matrices) so a future Streamlit rewire (or any other client) can
+  plot them however it wants.
+- **Comparison logic extracted into `utils/comparison.py`**, ported from `pages/4_Comparison.py`'s
+  `score_regression_models`/`score_clustering_models` but rewritten to operate on plain metric
+  dicts (not DataFrames holding model objects) — reused by `api/routers/comparison.py`. Page 4
+  itself was deliberately left untouched (still has its own inline copy) since it's out of scope
+  until the Streamlit rewire pass; noted here so the duplication is intentional, not forgotten.
+- **In-memory model registry for `/modeling/download/{model_id}`** — trained sklearn models are
+  kept in a module-level dict keyed by UUID, not persisted. Acceptable for a local dev API (mirrors
+  today's session-scoped download button); doesn't survive an API restart or scale across workers,
+  which is fine at this project's current stage and noted directly in the 404 error message rather
+  than silently failing.
+- **Metric key renaming**: `utils/modeling.py` uses display-oriented keys like `"R²"`, `"CV R²"`,
+  `"Overfit Gap"` (unicode/spaces, fine for a Streamlit dataframe column, awkward as a JSON/API
+  contract). `api/serialization.py` renames these to plain identifiers (`R2`, `CV_R2`,
+  `Overfit_Gap`, ...) on the way out, matching what `utils/comparison.py` expects — so a
+  `/modeling/.../regression` response can be fed directly into `/comparison/regression` with no
+  client-side reshaping.
+
+**Mistakes & fixes:** none blocking this time — the section 1 SQLAlchemy/pandas version lesson
+(host env needs 2.0+ for pandas 3.0's `to_sql`; only the Airflow image is pinned to 1.4) carried
+forward cleanly since the API runs in the host env. One real test-harness slip caught immediately:
+first curl against `/datasets/generate` used `dataset_type: "Two Moons"` with `task_type:
+"Classification"` — `"Two Moons"` is a *clustering* dataset type (`CLASSIFICATION_DATASETS` are
+`"Linearly Separable"`/`"Overlapping Classes"`/`"Imbalanced Classes"`); `utils/generators.py`
+correctly raised `KeyError` rather than silently returning the wrong data. Not a code bug — retried
+with a valid dataset type.
+
+**Verification performed** (real requests against live MinIO/Postgres, not just written):
+- `POST /datasets/generate` → `POST /datasets/{name}/clean` → confirmed report/validation/load
+  summary, for classification, regression, and clustering generated datasets.
+- `POST /datasets/upload` (real multipart file) → clean → `GET /datasets/{name}/data` round-trip.
+- `POST /datasets/kaggle` (`uciml/iris`, real Kaggle pull) → extract confirmed.
+- All 7 EDA endpoints (summary, missing, distributions, boxplot, qq, correlation, variance) called
+  against a real cleaned dataset and checked for correct shapes/values.
+- `POST /modeling/.../regression` and `.../classification` — checked metrics, then fed a real
+  response straight into `POST /comparison/regression` / `/comparison/classification` and
+  confirmed the winner matched hand-checked expectations (highest Macro F1 for classification;
+  highest generalization_score for regression).
+- `POST /clustering/{name}` with a real `ground_truth_col` — confirmed FM Score/Rand Index appear,
+  projection returns 300 points matching input row count, and `/comparison/clustering` correctly
+  broke a 2-way `metric_wins` tie using Silhouette (matching `pages/4_Comparison.py`'s tiebreak
+  order).
+- `GET /modeling/download/{model_id}` — downloaded a real `.pkl`, unpickled it outside the API
+  process, and called `.predict()` on the restored `KNeighborsClassifier` to confirm it's a
+  genuinely fitted model, not just a serialized stub.
+- Error paths: 404 for an unknown dataset (`/eda/...`, `/datasets/.../clean`), 422 with the full
+  Great Expectations failure report for a `/clean` request whose `label_col` doesn't exist in the
+  data.

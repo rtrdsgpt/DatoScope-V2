@@ -52,6 +52,52 @@ def _write_raw(store: ObjectStore, source: str, dataset_name: str, df: pd.DataFr
     return {"bucket": store.settings.raw_bucket, "data_key": data_key, "meta_key": meta_key, "run_id": run_id, "metadata": metadata}
 
 
+_SOURCES = ("generated", "uploaded", "kaggle")
+
+
+class RawRunNotFoundError(Exception):
+    pass
+
+
+def find_raw_run(dataset_name: str, run_id: str | None = None, store: ObjectStore | None = None) -> dict:
+    """
+    Look up a raw extract by dataset_name (+ optional run_id) without the
+    caller needing to know which source produced it. run_id is a sortable
+    UTC timestamp string, so "latest" is just a max() over the listing.
+    """
+    store = store or ObjectStore()
+    store.ensure_zones()
+    candidates: list[tuple[str, str]] = []  # (run_id, source)
+
+    for source in _SOURCES:
+        prefix = f"raw/{source}/{dataset_name}/"
+        for key in store.list_keys(store.settings.raw_bucket, prefix):
+            if key.endswith("/metadata.json"):
+                candidate_run_id = key[len(prefix) : -len("/metadata.json")]
+                candidates.append((candidate_run_id, source))
+
+    if not candidates:
+        raise RawRunNotFoundError(f"No raw extract found for dataset '{dataset_name}'")
+
+    if run_id is not None:
+        matches = [c for c in candidates if c[0] == run_id]
+        if not matches:
+            raise RawRunNotFoundError(f"No raw extract '{run_id}' for dataset '{dataset_name}'")
+        chosen_run_id, source = matches[0]
+    else:
+        chosen_run_id, source = max(candidates, key=lambda c: c[0])
+
+    prefix = f"raw/{source}/{dataset_name}/{chosen_run_id}"
+    metadata = store.get_json(store.settings.raw_bucket, f"{prefix}/metadata.json")
+    return {
+        "bucket": store.settings.raw_bucket,
+        "data_key": f"{prefix}/data.parquet",
+        "meta_key": f"{prefix}/metadata.json",
+        "run_id": chosen_run_id,
+        "metadata": metadata,
+    }
+
+
 def extract_generated(df: pd.DataFrame, dataset_name: str, generator_meta: dict, store: ObjectStore | None = None) -> dict:
     """Land an in-app synthetically generated dataset in the raw zone."""
     store = store or ObjectStore()
