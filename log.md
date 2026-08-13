@@ -226,3 +226,106 @@ with a valid dataset type.
 - Error paths: 404 for an unknown dataset (`/eda/...`, `/datasets/.../clean`), 422 with the full
   Great Expectations failure report for a `/clean` request whose `label_col` doesn't exist in the
   data.
+
+---
+
+## Section 2 (continued) — Streamlit becomes an API client
+
+**Progress:** the deferred half of section 2 — `utils/api_client.py` plus a rewrite of the sidebar
+(`utils/data_input.py`, `utils/app_state.py`) and all four pages to call the API over HTTP instead
+of `utils.generators`/`utils.preprocessing`/`utils.modeling` directly. Verified in an actual
+browser (Playwright, headless Chromium — no `chromium-cli`/Node available in this environment, so
+installed `playwright` into the project venv and drove it with a Python script instead), not just
+started and assumed working.
+
+**Decisions**
+- **A real bug was found before any UI code was touched**: `etl/transform.transform_raw` reused
+  the raw extract's `run_id` for the processed/warehouse output too. The new interactive "tweak
+  cleaning params, click Clean & Preprocess again" flow this rewire adds calls `/clean` repeatedly
+  against the *same* raw extract — which would have silently written duplicate rows into the
+  warehouse under one `run_id` every time. Fixed by having `transform_raw` mint its own fresh
+  `run_id` (via a new shared `etl/storage.new_run_id()`, also adopted by `extract.py`) and carry
+  the raw extract's id forward as `source_run_id` for lineage instead. Verified directly (not just
+  inferred): called `/clean` twice against one raw extract with different parameters and confirmed
+  two distinct, correctly-row-counted warehouse runs rather than one doubled one. This is exactly
+  the kind of bug that only surfaces when you build the actual caller, not just the endpoint —
+  logged here because it would have been easy to ship silently.
+- **The section 2 API design had missed the "separate test dataset" flow** — `RegressionRequest`/
+  `ClassificationRequest` only ever passed `df_test=None` to `utils.modeling`, so the "Upload
+  Train/Test" and "Generate with a train/test split" flows (real, existing app features) had no
+  API equivalent. Added `test_dataset_name`/`test_run_id` to both request schemas and threaded
+  them through to `run_regression_models`/`run_classification_models`'s existing `df_test`
+  parameter — no new modeling logic needed, just exposing what was already there. Verified via the
+  browser test: training against a split-generated dataset correctly reports `split_method:
+  "Uploaded test file"` rather than an auto-split.
+- **`/datasets/generate` now supports `create_split`/`test_split_pct` server-side** — splits with
+  `sklearn.train_test_split` (same call the sidebar used to make locally) and extracts *both*
+  halves as separate raw datasets (`<name>` and `<name>__test`) in one request, so lineage stays
+  "generated" for both rather than the alternative (generate whole, fetch it back, split locally,
+  re-upload each half as if it were a user upload).
+- **Added `GET /datasets/{name}/raw`** (reads the raw zone directly, mirroring the existing
+  `/data` warehouse endpoint) — needed because the EDA page's pre-clean views (raw dataset
+  preview, the generated-data scatter, the "Missing Values (Train)" chart) need actual row-level
+  data before anything has been committed to the warehouse, and the sidebar's live "about to
+  remove N rows" outlier estimate needs the raw dataframe in hand to compute against.
+- **EDA stats: API when cleaned, local fallback when not** — `GET /eda/...` only ever reads
+  warehouse (processed) data, but the app has always let users explore *raw* data before deciding
+  cleaning parameters (a deliberate, existing UX choice — auto-cleaning on extract would remove
+  that). So `pages/1_EDA.py` calls the API once a dataset has a `processed_run_id` (the normal,
+  expected path after Clean & Preprocess) and falls back to the exact same local pandas/scipy
+  computation as before when it doesn't. Both paths produce identical numbers; only the "where it's
+  computed" differs. This dual-path is why `pages/1_EDA.py` stayed large rather than shrinking.
+- **Clustering diagnostics that need the raw scaled matrix (dendrogram, elbow curve) stayed
+  client-side**, reading a `X` field added to the clustering API response (the same scaled
+  DataFrame `utils.modeling.run_clustering_models` already returns internally) rather than adding
+  narrow one-off endpoints for each diagnostic view. The *primary* clustering computation (fit +
+  metrics + 2D projection) is fully server-side; these two supplementary views are page-specific
+  and operate directly on data already fetched alongside the main result, the same way EDA's
+  Plotly rendering stays client-side over API-computed numbers.
+- **Random Forest tree view required fetching the model back**: `plot_tree` needs the actual
+  fitted `RandomForestClassifier.estimators_`, which the API doesn't return in the training
+  response (by design — that's what `/modeling/download/{model_id}` is for). `pages/2_Supervised_
+  Modeling.py` downloads and unpickles the model via that endpoint, cached client-side with
+  `@st.cache_data` keyed on `model_id` so the interactive tree-index/depth sliders (which trigger
+  a Streamlit rerun on every change) don't re-download the model on each interaction.
+- **Comparison page now calls `/comparison/*`** instead of its own inline `score_regression_
+  models`/`score_clustering_models` copies — the duplication flagged as deliberate-for-now in the
+  previous log entry is gone; both the API and the page use `utils/comparison.py`.
+
+**Mistakes & fixes**
+- Playwright/browser test harness: `chromium-cli` (the tool this environment's `run` skill
+  documents) isn't installed and neither is Node/npm, so it was installed as `playwright` (Python)
+  into the project venv instead, with Chromium downloaded via `playwright install chromium`. Not a
+  project dependency — not added to `requirements.txt`, purely a one-off verification tool for
+  this session.
+- Several Playwright selector attempts against Streamlit's newer react-aria combobox widgets
+  timed out intermittently (`get_by_role("option", ...)` after a `.click()` to open the dropdown —
+  the floating listbox would sometimes close again before the click landed, likely racing a
+  Streamlit rerender). Switched to a more robust `click()` → `fill()` → `Enter` pattern
+  (type-ahead + keyboard select) for all dropdown interactions, which was reliable across every
+  subsequent test run.
+
+**Verification performed** (real browser, real API, real warehouse — screenshots inspected, not
+just "no exception raised"):
+- App loads with zero console errors.
+- Sidebar: generated a Classification dataset with an 80/20 split (400/100 rows, confirmed in the
+  Dataset Metadata panel), set a label column, ran Clean & Preprocess — outlier-removal estimate
+  captions rendered correctly for both train and test before committing.
+- EDA page: confirmed the "Stats computed via the API from the warehouse (`dataset_name`, run
+  `...`)" caption appears, then visually inspected summary statistics, feature-distribution
+  histograms (server-computed bin edges/counts rendered as `go.Bar`), box plots (rendered from
+  precomputed quartiles, including the mean±std diamond marker), Q-Q plots, and the correlation
+  heatmap — all correct.
+- Supervised Modeling: trained Logistic Regression + Random Forest against a *separate uploaded
+  test dataset* — confirmed "Evaluation split: Uploaded test file" (proving the new
+  `test_dataset_name` wiring), confusion matrix, classification report, and the Random Forest Tree
+  View rendering an actual decision tree from a model downloaded and unpickled from the API at
+  runtime.
+- Comparison page: correctly selected Random Forest as the winner (highest Macro F1) with the
+  right supporting numbers in the "why this model won" text.
+- Clustering: generated a dedicated clustering dataset, ran K-Means/DBSCAN/Hierarchical, confirmed
+  ground-truth metrics (FM Score, Rand Index) from the auto-detected `label` column, the PCA
+  scatter projection, cluster-size bars, and — reading the API's returned scaled matrix — a correct
+  dendrogram.
+- Zero console/page errors across the entire flow (generate → clean → EDA → model → compare →
+  cluster).

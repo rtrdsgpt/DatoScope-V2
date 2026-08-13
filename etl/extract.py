@@ -21,17 +21,13 @@ import pandas as pd
 
 from data_loader import load_any_dataset
 from etl.config import get_settings
-from etl.storage import ObjectStore
+from etl.storage import ObjectStore, new_run_id
 from utils.preprocessing import parse_uploaded_bytes
-
-
-def _run_id() -> str:
-    return datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%S%fZ")
 
 
 def _write_raw(store: ObjectStore, source: str, dataset_name: str, df: pd.DataFrame, extra_meta: dict) -> dict:
     store.ensure_zones()
-    run_id = _run_id()
+    run_id = new_run_id()
     prefix = f"raw/{source}/{dataset_name}/{run_id}"
     data_key = f"{prefix}/data.parquet"
     meta_key = f"{prefix}/metadata.json"

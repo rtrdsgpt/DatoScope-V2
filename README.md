@@ -179,26 +179,33 @@ docker compose run --rm airflow-init -c "airflow dags test datoscope_etl_dag $(d
 
 `api/` is a FastAPI backend exposing dataset ingestion, EDA, preprocessing, modeling, and
 clustering as REST endpoints, reading from the Postgres warehouse (via `etl/load.py`) instead of
-local files. It currently runs alongside the Streamlit app rather than being called by it —
-Streamlit still uses `utils/*` directly for now; wiring Streamlit to call this API instead is a
-follow-up pass (see `todo.md` section 2).
+local files. **Streamlit is a client of this API** (`utils/api_client.py`) — the sidebar's
+Generate/Upload/Clean & Preprocess and all four pages call it over HTTP rather than calling
+`utils.generators`/`utils.preprocessing`/`utils.modeling` in-process. Run both together:
 
 ```bash
 docker compose up -d minio warehouse
-uvicorn api.main:app --reload   # docs at http://localhost:8000/docs
+uvicorn api.main:app --reload &          # docs at http://localhost:8000/docs
+streamlit run app.py
 ```
+
+Streamlit finds the API at `API_BASE_URL` (env var, defaults to `http://localhost:8000`).
 
 Typical flow: `POST /datasets/generate` (or `/upload`, `/kaggle`) lands raw data and returns a
 `run_id`, then `POST /datasets/{name}/clean` transforms + validates + loads it into the warehouse
-(same as the ETL pipeline's stages). From there:
+(same as the ETL pipeline's stages) and returns a *new* `run_id` — a raw extract can be cleaned
+more than once (different parameters), each producing its own queryable warehouse run rather than
+colliding. From there:
 
+- `GET /datasets/{name}/raw|data` — row-level data (raw zone / warehouse respectively)
 - `GET /eda/{name}/summary|missing|distributions|boxplot|qq|correlation|variance` — EDA stats
-- `POST /modeling/{name}/regression|classification` — train/evaluate, returns metrics + a
-  `model_id`; `GET /modeling/download/{model_id}` returns the fitted model as a `.pkl`
+- `POST /modeling/{name}/regression|classification` — train/evaluate (optionally against a
+  separate `test_dataset_name`/`test_run_id`), returns metrics + a `model_id`;
+  `GET /modeling/download/{model_id}` returns the fitted model as a `.pkl`
 - `POST /clustering/{name}` — train/evaluate KMeans/DBSCAN/Hierarchical + a 2D projection for
-  plotting
+  plotting + the scaled feature matrix (used client-side for the dendrogram/elbow diagnostics)
 - `POST /comparison/regression|classification|clustering` — stateless winner-selection over a set
-  of already-computed model metrics (same scoring logic as `pages/4_Comparison.py`)
+  of already-computed model metrics (shared with the API via `utils/comparison.py`)
 
 ## Supported File Types
 

@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import pickle
+
 import matplotlib
 import numpy as np
 import pandas as pd
@@ -8,13 +10,20 @@ import plotly.graph_objects as go
 import streamlit as st
 from sklearn.tree import plot_tree
 
+from utils import api_client
+from utils.api_client import ApiError
 from utils.app_state import active_test_df, active_train_df, init_state
 from utils.data_input import render_data_sidebar
-from utils.modeling import export_model_bytes, infer_supervised_task, run_classification_models, run_regression_models
+from utils.modeling import infer_supervised_task
 from utils.ui import PLOTLY_THEME, setup_page
 
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt
+
+
+@st.cache_data(show_spinner=False)
+def _download_and_unpickle(model_id: str) -> dict:
+    return pickle.loads(api_client.download_model(model_id))
 
 
 setup_page("DatoScope · Supervised")
@@ -27,6 +36,9 @@ df_train = active_train_df()
 df_test = active_test_df()
 if df_train is None:
     st.info("Load or generate a dataset first.")
+    st.stop()
+if not st.session_state.processed_run_id:
+    st.info("Run Clean & Preprocess in the sidebar first — modeling reads from the warehouse via the API.")
     st.stop()
 
 active_task = st.session_state.data_meta.get("active_ml_task", "Auto")
@@ -70,6 +82,7 @@ if not features:
     st.warning("Select at least one feature column.")
     st.stop()
 
+has_test_dataset = bool(st.session_state.test_processed_run_id)
 missing_in_test = [c for c in features if df_test is not None and c not in df_test.columns]
 if missing_in_test:
     st.error(f"Uploaded test data is missing features: {', '.join(missing_in_test)}")
@@ -85,6 +98,12 @@ if len(numeric_features) != len(features):
     if not features:
         st.stop()
 
+test_kwargs = (
+    {"test_dataset_name": st.session_state.test_dataset_name, "test_run_id": st.session_state.test_processed_run_id}
+    if has_test_dataset
+    else {}
+)
+
 if task_choice == "Regression":
     st.markdown("#### Regression Models")
     conf_a, conf_b = st.columns(2)
@@ -97,22 +116,28 @@ if task_choice == "Regression":
         lasso_alpha = st.select_slider("Lasso α", [0.001, 0.01, 0.1, 1, 10, 100], value=0.1)
 
     if st.button("🚀 Train Regression Models", use_container_width=True):
-        st.session_state.reg_results = run_regression_models(
-            df_train,
-            df_test,
-            features=features,
-            target_col=target_col,
-            test_size=test_size,
-            cv_folds=cv_folds,
-            random_seed=random_seed,
-            run_lr=run_lr,
-            run_ridge=run_ridge,
-            ridge_alpha=ridge_alpha,
-            run_lasso=run_lasso,
-            lasso_alpha=lasso_alpha,
-        )
-        if st.session_state.reg_results:
-            st.session_state.data_meta["split_method"] = next(iter(st.session_state.reg_results.values()))["split_method"]
+        with st.spinner("Training…"):
+            try:
+                st.session_state.reg_results = api_client.train_regression(
+                    st.session_state.dataset_name,
+                    run_id=st.session_state.processed_run_id,
+                    features=features,
+                    target_col=target_col,
+                    test_size=test_size,
+                    cv_folds=cv_folds,
+                    random_seed=random_seed,
+                    run_lr=run_lr,
+                    run_ridge=run_ridge,
+                    ridge_alpha=ridge_alpha,
+                    run_lasso=run_lasso,
+                    lasso_alpha=lasso_alpha,
+                    **test_kwargs,
+                )
+            except ApiError as exc:
+                st.error(f"Training failed: {exc}")
+            else:
+                if st.session_state.reg_results:
+                    st.session_state.data_meta["split_method"] = next(iter(st.session_state.reg_results.values()))["split_method"]
 
     res = st.session_state.reg_results
     if not res:
@@ -123,9 +148,9 @@ if task_choice == "Regression":
     metric_rows = [
         {
             "Model": name,
-            "R²": r["R²"],
-            "CV R²": r["CV R²"],
-            "Overfit Gap": r["Overfit Gap"],
+            "R²": r["R2"],
+            "CV R²": r["CV_R2"],
+            "Overfit Gap": r["Overfit_Gap"],
             "RMSE": r["RMSE"],
             "MAE": r["MAE"],
             "MSE": r["MSE"],
@@ -143,10 +168,10 @@ if task_choice == "Regression":
     for name, r in res.items():
         st.markdown(f"---\n#### {name}")
         m1, m2, m3, m4 = st.columns(4)
-        m1.metric("R²", r["R²"])
-        m2.metric("CV R²", r["CV R²"])
+        m1.metric("R²", r["R2"])
+        m2.metric("CV R²", r["CV_R2"])
         m3.metric("RMSE", r["RMSE"])
-        m4.metric("Overfit Gap", r["Overfit Gap"])
+        m4.metric("Overfit Gap", r["Overfit_Gap"])
 
         ytest_arr = np.array(r["y_test"])
         ypred_arr = np.array(r["y_pred"])
@@ -190,20 +215,25 @@ if task_choice == "Regression":
             st.plotly_chart(fig_res, use_container_width=True)
 
         with fc:
-            if "coef" in r:
+            if r.get("coef"):
                 coef_df = pd.DataFrame({"Feature": list(r["coef"].keys()), "Coefficient": list(r["coef"].values())})
                 coef_df = coef_df.reindex(coef_df["Coefficient"].abs().sort_values(ascending=True).index)
                 fig_c2 = px.bar(coef_df, x="Coefficient", y="Feature", orientation="h", color="Coefficient", color_continuous_scale="RdBu", color_continuous_midpoint=0)
                 fig_c2.update_layout(title="Coefficients", height=300, coloraxis_showscale=False, **PLOTLY_THEME)
                 st.plotly_chart(fig_c2, use_container_width=True)
 
-        st.download_button(
-            f"⬇ Download {name} model",
-            export_model_bytes(r["model"], features=r["features"], target=r["target"], task_type="regression"),
-            file_name=f"{name.lower().replace(' ', '_').replace('(', '').replace(')', '').replace('α', 'alpha')}.pkl",
-            mime="application/octet-stream",
-            key=f"download_reg_{name}",
-        )
+        try:
+            model_bytes = api_client.download_model(r["model_id"])
+        except ApiError as exc:
+            st.caption(f"Model download unavailable: {exc}")
+        else:
+            st.download_button(
+                f"⬇ Download {name} model",
+                model_bytes,
+                file_name=f"{name.lower().replace(' ', '_').replace('(', '').replace(')', '').replace('α', 'alpha')}.pkl",
+                mime="application/octet-stream",
+                key=f"download_reg_{name}",
+            )
 
 else:
     st.markdown("#### Classification Models")
@@ -248,27 +278,33 @@ else:
     rf_max_depth = None if rf_max_depth_raw == 0 else rf_max_depth_raw
 
     if st.button("🚀 Train Classification Models", use_container_width=True):
-        st.session_state.cls_results = run_classification_models(
-            df_train,
-            df_test,
-            features=features,
-            target_col=target_col,
-            test_size=test_size,
-            cv_folds=cv_folds,
-            random_seed=random_seed,
-            run_logreg=run_logreg,
-            run_rf=run_rf,
-            rf_estimators=rf_estimators,
-            rf_max_depth=rf_max_depth,
-            rf_min_samples_split=rf_min_samples_split,
-            rf_min_samples_leaf=rf_min_samples_leaf,
-            rf_max_features=rf_max_features,
-            rf_bootstrap=rf_bootstrap,
-            run_knn=run_knn,
-            knn_neighbors=knn_neighbors,
-        )
-        if st.session_state.cls_results:
-            st.session_state.data_meta["split_method"] = next(iter(st.session_state.cls_results.values()))["split_method"]
+        with st.spinner("Training…"):
+            try:
+                st.session_state.cls_results = api_client.train_classification(
+                    st.session_state.dataset_name,
+                    run_id=st.session_state.processed_run_id,
+                    features=features,
+                    target_col=target_col,
+                    test_size=test_size,
+                    cv_folds=cv_folds,
+                    random_seed=random_seed,
+                    run_logreg=run_logreg,
+                    run_rf=run_rf,
+                    rf_estimators=rf_estimators,
+                    rf_max_depth=rf_max_depth,
+                    rf_min_samples_split=rf_min_samples_split,
+                    rf_min_samples_leaf=rf_min_samples_leaf,
+                    rf_max_features=rf_max_features,
+                    rf_bootstrap=rf_bootstrap,
+                    run_knn=run_knn,
+                    knn_neighbors=knn_neighbors,
+                    **test_kwargs,
+                )
+            except ApiError as exc:
+                st.error(f"Training failed: {exc}")
+            else:
+                if st.session_state.cls_results:
+                    st.session_state.data_meta["split_method"] = next(iter(st.session_state.cls_results.values()))["split_method"]
 
     res = st.session_state.cls_results
     if not res:
@@ -283,8 +319,8 @@ else:
             "Precision": r["Precision"],
             "Recall": r["Recall"],
             "F1": r["F1"],
-            "Macro F1": r["Macro F1"],
-            "CV Accuracy": r["CV Accuracy"],
+            "Macro F1": r["Macro_F1"],
+            "CV Accuracy": r["CV_Accuracy"],
         }
         for name, r in res.items()
     ]
@@ -300,42 +336,54 @@ else:
         m1.metric("Accuracy", r["Accuracy"])
         m2.metric("Precision", r["Precision"])
         m3.metric("Recall", r["Recall"])
-        m4.metric("Macro F1", r["Macro F1"])
+        m4.metric("Macro F1", r["Macro_F1"])
 
         chart_col, tree_col = st.columns([1.2, 0.8])
         with chart_col:
-            cm = r["Confusion Matrix"]
+            cm = r["confusion_matrix"]
             labels = sorted(pd.Series(r["y_test"]).astype(str).unique())
             fig_cm = px.imshow(cm, text_auto=True, x=labels, y=labels, color_continuous_scale="Blues")
             fig_cm.update_layout(title="Confusion Matrix", xaxis_title="Predicted", yaxis_title="Actual", height=380, **PLOTLY_THEME)
             st.plotly_chart(fig_cm, use_container_width=True)
-            report_df = pd.DataFrame(r["Report"]).T
+            report_df = pd.DataFrame(r["report"]).T
             st.dataframe(report_df, use_container_width=True)
 
         with tree_col:
-            if hasattr(r["model"], "estimators_"):
-                st.markdown("##### Random Forest Tree View")
-                tree_count = len(r["model"].estimators_)
-                tree_idx = st.slider(f"Tree index for {name}", 0, tree_count - 1, 0, key=f"rf_tree_{name}")
-                plot_depth = st.slider(f"Tree plot depth for {name}", 1, 6, 3, key=f"rf_plot_depth_{name}")
-                fig_tree, ax = plt.subplots(figsize=(10, 5))
-                plot_tree(
-                    r["model"].estimators_[tree_idx],
-                    feature_names=r["features"],
-                    class_names=[str(c) for c in r["model"].classes_],
-                    filled=True,
-                    max_depth=plot_depth,
-                    fontsize=7,
-                    ax=ax,
-                )
-                plt.tight_layout()
-                st.pyplot(fig_tree, use_container_width=True)
-                plt.close(fig_tree)
+            if name.startswith("Random Forest"):
+                try:
+                    payload = _download_and_unpickle(r["model_id"])
+                except ApiError as exc:
+                    st.caption(f"Tree view unavailable: {exc}")
+                    payload = None
+                if payload is not None and hasattr(payload["model"], "estimators_"):
+                    st.markdown("##### Random Forest Tree View")
+                    model = payload["model"]
+                    tree_count = len(model.estimators_)
+                    tree_idx = st.slider(f"Tree index for {name}", 0, tree_count - 1, 0, key=f"rf_tree_{name}")
+                    plot_depth = st.slider(f"Tree plot depth for {name}", 1, 6, 3, key=f"rf_plot_depth_{name}")
+                    fig_tree, ax = plt.subplots(figsize=(10, 5))
+                    plot_tree(
+                        model.estimators_[tree_idx],
+                        feature_names=r["features"],
+                        class_names=[str(c) for c in model.classes_],
+                        filled=True,
+                        max_depth=plot_depth,
+                        fontsize=7,
+                        ax=ax,
+                    )
+                    plt.tight_layout()
+                    st.pyplot(fig_tree, use_container_width=True)
+                    plt.close(fig_tree)
 
-        st.download_button(
-            f"⬇ Download {name} model",
-            export_model_bytes(r["model"], features=r["features"], target=r["target"], task_type="classification"),
-            file_name=f"{name.lower().replace(' ', '_').replace('(', '').replace(')', '')}.pkl",
-            mime="application/octet-stream",
-            key=f"download_cls_{name}",
-        )
+        try:
+            model_bytes = api_client.download_model(r["model_id"])
+        except ApiError as exc:
+            st.caption(f"Model download unavailable: {exc}")
+        else:
+            st.download_button(
+                f"⬇ Download {name} model",
+                model_bytes,
+                file_name=f"{name.lower().replace(' ', '_').replace('(', '').replace(')', '')}.pkl",
+                mime="application/octet-stream",
+                key=f"download_cls_{name}",
+            )

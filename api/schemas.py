@@ -27,6 +27,8 @@ class GenerateDatasetRequest(BaseModel):
     n_features: int = 6
     n_informative: int = 5
     target_name: str = "target"
+    create_split: bool = False  # Regression/Classification only; splits into two datasets (train + "<name>__test")
+    test_split_pct: int = 20
 
 
 class KaggleDatasetRequest(BaseModel):
@@ -40,6 +42,8 @@ class CleanRequest(CleanParams):
 
 class RegressionRequest(BaseModel):
     run_id: str | None = None
+    test_dataset_name: str | None = None  # if set, evaluate against this dataset instead of an auto split
+    test_run_id: str | None = None
     features: list[str]
     target_col: str
     test_size: float = 0.2
@@ -54,6 +58,8 @@ class RegressionRequest(BaseModel):
 
 class ClassificationRequest(BaseModel):
     run_id: str | None = None
+    test_dataset_name: str | None = None
+    test_run_id: str | None = None
     features: list[str]
     target_col: str
     test_size: float = 0.2

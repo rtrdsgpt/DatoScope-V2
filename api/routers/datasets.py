@@ -13,6 +13,7 @@ particular cleaning configuration, same as the current Streamlit sidebar's
 from __future__ import annotations
 
 from fastapi import APIRouter, File, Form, HTTPException, UploadFile
+from sklearn.model_selection import train_test_split
 
 from api.schemas import CleanRequest, GenerateDatasetRequest, KaggleDatasetRequest
 from etl.extract import RawRunNotFoundError, extract_generated, extract_kaggle, extract_uploaded, find_raw_run
@@ -50,8 +51,22 @@ def generate(req: GenerateDatasetRequest) -> dict:
         target_name=req.target_name,
     )
     dataset_name = req.dataset_name or f"{req.task_type.lower()}_{req.dataset_type.lower().replace(' ', '_')}"
-    raw_ref = extract_generated(df, dataset_name, meta)
-    return {**_raw_preview(raw_ref), "generator_meta": meta}
+
+    do_split = req.create_split and req.task_type != "Clustering"
+    if do_split:
+        target_col = meta.get("target_column", req.target_name)
+        stratify = df[target_col] if req.task_type == "Classification" and target_col in df.columns else None
+        train_df, test_df = train_test_split(
+            df, test_size=req.test_split_pct / 100, random_state=req.random_seed, stratify=stratify
+        )
+        train_meta = {**meta, "split_method": f"Generated split ({req.test_split_pct}% test)"}
+        test_meta = {**meta, "split_method": f"Generated split ({req.test_split_pct}% test)"}
+        train_ref = extract_generated(train_df.reset_index(drop=True), dataset_name, train_meta)
+        test_ref = extract_generated(test_df.reset_index(drop=True), f"{dataset_name}__test", test_meta)
+        return {**_raw_preview(train_ref), "generator_meta": train_meta, "test": _raw_preview(test_ref)}
+
+    raw_ref = extract_generated(df, dataset_name, {**meta, "split_method": "Single generated dataset"})
+    return {**_raw_preview(raw_ref), "generator_meta": meta, "test": None}
 
 
 @router.post("/upload")
@@ -141,6 +156,26 @@ def data(dataset_name: str, run_id: str | None = None, limit: int = 500) -> dict
         raise HTTPException(status_code=404, detail=str(exc)) from exc
     return {
         "dataset_name": dataset_name,
+        "run_id": run_id,
+        "n_rows": len(df),
+        "n_cols": len(df.columns),
+        "columns": df.columns.tolist(),
+        "records": df.head(limit).to_dict(orient="records"),
+    }
+
+
+@router.get("/{dataset_name}/raw")
+def raw(dataset_name: str, run_id: str | None = None, limit: int = 500) -> dict:
+    """Read straight from the raw zone (pre-clean) — used for previewing a fresh extract."""
+    store = ObjectStore()
+    try:
+        raw_ref = find_raw_run(dataset_name, run_id, store=store)
+    except RawRunNotFoundError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    df = store.get_dataframe(raw_ref["bucket"], raw_ref["data_key"])
+    return {
+        "dataset_name": dataset_name,
+        "run_id": raw_ref["run_id"],
         "n_rows": len(df),
         "n_cols": len(df.columns),
         "columns": df.columns.tolist(),

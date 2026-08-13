@@ -10,12 +10,18 @@ from __future__ import annotations
 
 import io
 import json
+from datetime import datetime, timezone
 
 import boto3
 import pandas as pd
 from botocore.exceptions import ClientError
 
 from etl.config import Settings, get_settings
+
+
+def new_run_id() -> str:
+    """Sortable UTC timestamp string — lexicographic order matches chronological order."""
+    return datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%S%fZ")
 
 
 class ObjectStore:

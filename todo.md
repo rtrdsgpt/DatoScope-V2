@@ -53,10 +53,16 @@ supersedes its scope with the additions below.
       `pages/4_Comparison.py` via the new `utils/comparison.py`). Verified end-to-end with real
       HTTP requests against live MinIO/Postgres for every endpoint, including the data-quality
       failure path (422) and 404s for unknown datasets.
-- [ ] Decouple the FastAPI backend from the Streamlit UI — Streamlit becomes one client, not the
-      whole app. Not done yet: the app still calls `utils/*` directly; this is the explicit
-      follow-up (deferred deliberately to avoid a large, regression-risky rewrite of ~1300 lines
-      of working, interactive UI code in the same pass as building the backend — see log.md)
+- [x] Decouple the FastAPI backend from the Streamlit UI — Streamlit becomes one client, not the
+      whole app. `utils/api_client.py` + sidebar (`utils/data_input.py`) and all four pages
+      rewired to call the API over HTTP instead of `utils.generators`/`utils.preprocessing`/
+      `utils.modeling` directly. Found and fixed a real bug uncovered by this rewire (transform
+      reused the raw extract's run_id, so re-cleaning collided in the warehouse — see log.md), and
+      added `test_dataset_name`/split support the original API design had missed. Verified in an
+      actual browser (Playwright) end to end: generate+split → clean → EDA (all 7 endpoints) →
+      classification training incl. the Random Forest tree view (downloads and unpickles the real
+      model) → comparison → clustering incl. dendrogram/elbow diagnostics — zero console errors
+      throughout.
 
 ## 3. Testing
 - [ ] pytest suite for `utils/preprocessing.py`, `utils/modeling.py`, `utils/generators.py`, and

@@ -98,4 +98,7 @@ def serialize_clustering_results(result: dict) -> dict:
             "FM_Score": row.get("FM Score"),
             "Rand_Index": row.get("Rand Index"),
         }
-    return {"models": models, "features": result["features"]}
+    # Scaled feature matrix — needed client-side for the dendrogram/elbow-curve
+    # diagnostics, which operate directly on the matrix rather than on
+    # already-computed metrics (see pages/3_Clustering.py).
+    return {"models": models, "features": result["features"], "X": result["X"].to_dict(orient="records")}

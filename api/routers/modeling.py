@@ -23,13 +23,18 @@ def _get_df(dataset_name: str, run_id: str | None):
 @router.post("/{dataset_name}/regression")
 def regression(dataset_name: str, req: RegressionRequest) -> dict:
     df = _get_df(dataset_name, req.run_id)
+    df_test = _get_df(req.test_dataset_name, req.test_run_id) if req.test_dataset_name else None
     missing = [c for c in [*req.features, req.target_col] if c not in df.columns]
     if missing:
         raise HTTPException(status_code=422, detail=f"Column(s) not found: {missing}")
+    if df_test is not None:
+        missing_test = [c for c in [*req.features, req.target_col] if c not in df_test.columns]
+        if missing_test:
+            raise HTTPException(status_code=422, detail=f"Column(s) not found in test dataset: {missing_test}")
 
     results = run_regression_models(
         df,
-        None,
+        df_test,
         features=req.features,
         target_col=req.target_col,
         test_size=req.test_size,
@@ -49,13 +54,18 @@ def regression(dataset_name: str, req: RegressionRequest) -> dict:
 @router.post("/{dataset_name}/classification")
 def classification(dataset_name: str, req: ClassificationRequest) -> dict:
     df = _get_df(dataset_name, req.run_id)
+    df_test = _get_df(req.test_dataset_name, req.test_run_id) if req.test_dataset_name else None
     missing = [c for c in [*req.features, req.target_col] if c not in df.columns]
     if missing:
         raise HTTPException(status_code=422, detail=f"Column(s) not found: {missing}")
+    if df_test is not None:
+        missing_test = [c for c in [*req.features, req.target_col] if c not in df_test.columns]
+        if missing_test:
+            raise HTTPException(status_code=422, detail=f"Column(s) not found in test dataset: {missing_test}")
 
     results = run_classification_models(
         df,
-        None,
+        df_test,
         features=req.features,
         target_col=req.target_col,
         test_size=req.test_size,

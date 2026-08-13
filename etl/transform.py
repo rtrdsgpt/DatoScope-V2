@@ -9,7 +9,7 @@ from __future__ import annotations
 
 from datetime import datetime, timezone
 
-from etl.storage import ObjectStore
+from etl.storage import ObjectStore, new_run_id
 from utils.preprocessing import clean_dataframe
 
 
@@ -17,7 +17,7 @@ def transform_raw(
     raw_bucket: str,
     raw_data_key: str,
     dataset_name: str,
-    run_id: str,
+    source_run_id: str,
     *,
     missing_strategy: str = "mean",
     outlier_method: str = "IQR",
@@ -29,6 +29,13 @@ def transform_raw(
     categorical_encoding_map: dict[str, str] | None = None,
     store: ObjectStore | None = None,
 ) -> dict:
+    """
+    `source_run_id` identifies the raw extract being transformed. The
+    processed output gets its *own* fresh run_id — transform can be called
+    repeatedly against the same raw extract (e.g. a user tweaking cleaning
+    parameters and re-running), and each call must land as a distinct,
+    separately-queryable warehouse run rather than colliding under one id.
+    """
     store = store or ObjectStore()
     raw_df = store.get_dataframe(raw_bucket, raw_data_key)
 
@@ -45,6 +52,7 @@ def transform_raw(
     )
 
     store.ensure_zones()
+    run_id = new_run_id()
     prefix = f"processed/{dataset_name}/{run_id}"
     data_key = f"{prefix}/data.parquet"
     meta_key = f"{prefix}/metadata.json"
@@ -53,6 +61,7 @@ def transform_raw(
     metadata = {
         "dataset_name": dataset_name,
         "run_id": run_id,
+        "source_run_id": source_run_id,
         "transformed_at": datetime.now(timezone.utc).isoformat(),
         "source_bucket": raw_bucket,
         "source_key": raw_data_key,
@@ -66,6 +75,7 @@ def transform_raw(
         "data_key": data_key,
         "meta_key": meta_key,
         "run_id": run_id,
+        "source_run_id": source_run_id,
         "report": report,
         "df": clean_df,
     }

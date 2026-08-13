@@ -8,6 +8,8 @@ import streamlit as st
 from plotly.subplots import make_subplots
 from scipy import stats
 
+from utils import api_client
+from utils.api_client import ApiError
 from utils.app_state import active_test_df, active_train_df, init_state
 from utils.data_input import render_data_sidebar
 from utils.ui import PLOTLY_THEME, dataset_preview_metrics, render_metadata_panel, setup_page, show_dataset_block
@@ -159,33 +161,78 @@ if not num_cols:
     st.warning("No numeric columns found.")
     st.stop()
 
+# EDA stats come from the API once the dataset has been cleaned (it's in the
+# warehouse then); before that there's no run_id to query, so fall back to
+# computing locally on the same in-memory data every other section already
+# uses — same numbers either way, just computed server-side when possible.
+if dataset_choice == "Train":
+    api_ref = (st.session_state.dataset_name, st.session_state.processed_run_id) if st.session_state.processed_run_id else None
+else:
+    api_ref = (st.session_state.test_dataset_name, st.session_state.test_processed_run_id) if st.session_state.test_processed_run_id else None
+
+if api_ref:
+    st.caption(f"Stats computed via the API from the warehouse (`{api_ref[0]}`, run `{api_ref[1][:15]}…`).")
+else:
+    st.caption("Dataset not yet cleaned — stats computed locally. Run Clean & Preprocess to use the API-backed EDA endpoints.")
+
 st.markdown("#### Summary Statistics")
 st.caption(
     "Interpretation guide: skewness near 0 is fairly symmetric, between 0.5 and 1.0 in magnitude suggests moderate skew, and above 1.0 suggests strong skew. "
     "For kurtosis, values near 0 are close to normal-tail behavior, above 0 indicate heavier tails and more extreme values, while below 0 indicate lighter tails."
 )
-stats_df = df_eda[num_cols].describe().T
-stats_df["skewness"] = df_eda[num_cols].skew().round(3)
-stats_df["kurtosis"] = df_eda[num_cols].kurtosis().round(3)
-st.dataframe(stats_df.style.background_gradient(cmap="Blues", subset=["mean", "std"]), use_container_width=True)
+try:
+    if api_ref:
+        resp = api_client.eda_summary(api_ref[0], run_id=api_ref[1])
+        stats_df = pd.DataFrame(resp["columns"]).set_index("feature")
+    else:
+        stats_df = df_eda[num_cols].describe().T
+        stats_df["skewness"] = df_eda[num_cols].skew().round(3)
+        stats_df["kurtosis"] = df_eda[num_cols].kurtosis().round(3)
+    st.dataframe(stats_df.style.background_gradient(cmap="Blues", subset=["mean", "std"]), use_container_width=True)
+except ApiError as exc:
+    st.error(f"Could not load summary statistics: {exc}")
 
 st.markdown("---")
 st.markdown("#### Feature Distributions")
 sel_cols = st.multiselect("Choose features", num_cols, default=num_cols[: min(4, len(num_cols))])
 if sel_cols:
-    n = len(sel_cols)
-    nc = min(3, n)
-    nr = (n + nc - 1) // nc
-    fig = make_subplots(rows=nr, cols=nc, subplot_titles=sel_cols, vertical_spacing=0.12)
-    for idx, col in enumerate(sel_cols):
-        row, col_idx = divmod(idx, nc)
-        fig.add_trace(
-            go.Histogram(x=df_eda[col].dropna(), nbinsx=40, name=col, marker_color="#00d4ff", opacity=0.75),
-            row + 1,
-            col_idx + 1,
-        )
-    fig.update_layout(showlegend=False, height=300 * nr, **PLOTLY_THEME)
-    st.plotly_chart(fig, use_container_width=True)
+    if api_ref:
+        try:
+            dist = api_client.eda_distributions(api_ref[0], run_id=api_ref[1], columns=sel_cols)["distributions"]
+        except ApiError as exc:
+            st.error(f"Could not load distributions: {exc}")
+            dist = None
+        if dist:
+            n = len(sel_cols)
+            nc = min(3, n)
+            nr = (n + nc - 1) // nc
+            fig = make_subplots(rows=nr, cols=nc, subplot_titles=sel_cols, vertical_spacing=0.12)
+            for idx, col in enumerate(sel_cols):
+                row, col_idx = divmod(idx, nc)
+                edges = dist[col]["bin_edges"]
+                centers = [(edges[i] + edges[i + 1]) / 2 for i in range(len(edges) - 1)]
+                widths = [edges[i + 1] - edges[i] for i in range(len(edges) - 1)]
+                fig.add_trace(
+                    go.Bar(x=centers, width=widths, y=dist[col]["counts"], name=col, marker_color="#00d4ff", opacity=0.75),
+                    row + 1,
+                    col_idx + 1,
+                )
+            fig.update_layout(showlegend=False, height=300 * nr, **PLOTLY_THEME)
+            st.plotly_chart(fig, use_container_width=True)
+    else:
+        n = len(sel_cols)
+        nc = min(3, n)
+        nr = (n + nc - 1) // nc
+        fig = make_subplots(rows=nr, cols=nc, subplot_titles=sel_cols, vertical_spacing=0.12)
+        for idx, col in enumerate(sel_cols):
+            row, col_idx = divmod(idx, nc)
+            fig.add_trace(
+                go.Histogram(x=df_eda[col].dropna(), nbinsx=40, name=col, marker_color="#00d4ff", opacity=0.75),
+                row + 1,
+                col_idx + 1,
+            )
+        fig.update_layout(showlegend=False, height=300 * nr, **PLOTLY_THEME)
+        st.plotly_chart(fig, use_container_width=True)
 
 st.markdown("---")
 st.markdown("#### Box Plots")
@@ -197,68 +244,124 @@ box_cols = st.multiselect(
     key="box_cols",
 )
 if box_cols:
-    outlier_stats = []
-    bn = len(box_cols)
-    bcols = min(2, bn)
-    brows = (bn + bcols - 1) // bcols
-    subplot_titles = []
-    for feature in box_cols:
-        series = df_eda[feature].dropna()
-        q1 = series.quantile(0.25)
-        q3 = series.quantile(0.75)
-        iqr = q3 - q1
-        lower = q1 - 1.5 * iqr
-        upper = q3 + 1.5 * iqr
-        outlier_mask = (series < lower) | (series > upper)
-        outlier_count = int(outlier_mask.sum())
-        outlier_pct = round((outlier_count / len(series)) * 100, 2) if len(series) else 0.0
-        outlier_stats.append(
-            {
-                "Feature": feature,
-                "Outlier %": outlier_pct,
-                "Outlier Count": outlier_count,
-                "Lower Bound": round(lower, 3),
-                "Upper Bound": round(upper, 3),
-            }
+    if api_ref:
+        try:
+            box_stats = api_client.eda_boxplot(api_ref[0], run_id=api_ref[1], columns=box_cols)["boxplot"]
+        except ApiError as exc:
+            st.error(f"Could not load box-plot stats: {exc}")
+            box_stats = None
+        if box_stats:
+            outlier_stats = [
+                {
+                    "Feature": feature,
+                    "Outlier %": s["outlier_pct"],
+                    "Outlier Count": s["outlier_count"],
+                    "Lower Bound": s["lower_bound"],
+                    "Upper Bound": s["upper_bound"],
+                }
+                for feature, s in box_stats.items()
+            ]
+            bn = len(box_cols)
+            bcols = min(2, bn)
+            brows = (bn + bcols - 1) // bcols
+            subplot_titles = [f"{f}<br><sup>{box_stats[f]['outlier_pct']}% outliers</sup>" for f in box_cols]
+            box_fig = make_subplots(rows=brows, cols=bcols, subplot_titles=subplot_titles, vertical_spacing=0.14)
+            for idx, feature in enumerate(box_cols):
+                row, col_idx = divmod(idx, bcols)
+                s = box_stats[feature]
+                box_fig.add_trace(
+                    go.Box(
+                        q1=[s["q1"]], median=[s["median"]], q3=[s["q3"]],
+                        lowerfence=[s["lower_bound"]], upperfence=[s["upper_bound"]],
+                        mean=[s["mean"]], sd=[s["std"]], boxmean="sd",
+                        name=feature,
+                        marker_color="#7c3aed",
+                        fillcolor="rgba(124,58,237,0.28)",
+                        line=dict(color="#00d4ff", width=1.5),
+                        showlegend=False,
+                    ),
+                    row + 1,
+                    col_idx + 1,
+                )
+            box_fig.update_layout(height=320 * brows, **PLOTLY_THEME)
+            st.plotly_chart(box_fig, use_container_width=True)
+            st.dataframe(
+                pd.DataFrame(outlier_stats).sort_values("Outlier %", ascending=False).reset_index(drop=True),
+                use_container_width=True,
+            )
+    else:
+        outlier_stats = []
+        bn = len(box_cols)
+        bcols = min(2, bn)
+        brows = (bn + bcols - 1) // bcols
+        subplot_titles = []
+        for feature in box_cols:
+            series = df_eda[feature].dropna()
+            q1 = series.quantile(0.25)
+            q3 = series.quantile(0.75)
+            iqr = q3 - q1
+            lower = q1 - 1.5 * iqr
+            upper = q3 + 1.5 * iqr
+            outlier_mask = (series < lower) | (series > upper)
+            outlier_count = int(outlier_mask.sum())
+            outlier_pct = round((outlier_count / len(series)) * 100, 2) if len(series) else 0.0
+            outlier_stats.append(
+                {
+                    "Feature": feature,
+                    "Outlier %": outlier_pct,
+                    "Outlier Count": outlier_count,
+                    "Lower Bound": round(lower, 3),
+                    "Upper Bound": round(upper, 3),
+                }
+            )
+            subplot_titles.append(f"{feature}<br><sup>{outlier_pct}% outliers</sup>")
+        box_fig = make_subplots(rows=brows, cols=bcols, subplot_titles=subplot_titles, vertical_spacing=0.14)
+        for idx, feature in enumerate(box_cols):
+            row, col_idx = divmod(idx, bcols)
+            box_fig.add_trace(
+                go.Box(
+                    y=df_eda[feature].dropna(),
+                    name=feature,
+                    boxmean="sd",
+                    marker_color="#7c3aed",
+                    fillcolor="rgba(124,58,237,0.28)",
+                    line=dict(color="#00d4ff", width=1.5),
+                    showlegend=False,
+                ),
+                row + 1,
+                col_idx + 1,
+            )
+        box_fig.update_layout(height=320 * brows, **PLOTLY_THEME)
+        st.plotly_chart(box_fig, use_container_width=True)
+        st.dataframe(
+            pd.DataFrame(outlier_stats).sort_values("Outlier %", ascending=False).reset_index(drop=True),
+            use_container_width=True,
         )
-        subplot_titles.append(f"{feature}<br><sup>{outlier_pct}% outliers</sup>")
-    box_fig = make_subplots(rows=brows, cols=bcols, subplot_titles=subplot_titles, vertical_spacing=0.14)
-    for idx, feature in enumerate(box_cols):
-        row, col_idx = divmod(idx, bcols)
-        box_fig.add_trace(
-            go.Box(
-                y=df_eda[feature].dropna(),
-                name=feature,
-                boxmean="sd",
-                marker_color="#7c3aed",
-                fillcolor="rgba(124,58,237,0.28)",
-                line=dict(color="#00d4ff", width=1.5),
-                showlegend=False,
-            ),
-            row + 1,
-            col_idx + 1,
-        )
-    box_fig.update_layout(height=320 * brows, **PLOTLY_THEME)
-    st.plotly_chart(box_fig, use_container_width=True)
-    st.dataframe(
-        pd.DataFrame(outlier_stats).sort_values("Outlier %", ascending=False).reset_index(drop=True),
-        use_container_width=True,
-    )
 
 st.markdown("---")
 st.markdown("#### Q-Q Plots")
 st.caption("Q-Q plots compare each feature against a normal distribution. Strong bends away from the diagonal suggest skew, heavy tails, or non-normal behavior.")
 qq_cols = st.multiselect("Choose features for Q-Q plots", num_cols, default=num_cols[: min(2, len(num_cols))], key="qq_cols")
 if qq_cols:
+    qq_data = None
+    if api_ref:
+        try:
+            qq_data = api_client.eda_qq(api_ref[0], run_id=api_ref[1], columns=qq_cols)["qq"]
+        except ApiError as exc:
+            st.error(f"Could not load Q-Q plot data: {exc}")
     qn = len(qq_cols)
     qcols = min(2, qn)
     qrows = (qn + qcols - 1) // qcols
     qq_fig = make_subplots(rows=qrows, cols=qcols, subplot_titles=qq_cols)
     for idx, col in enumerate(qq_cols):
         row, col_idx = divmod(idx, qcols)
-        series = df_eda[col].dropna()
-        osm, osr = stats.probplot(series, dist="norm", fit=False)
-        slope, intercept, _ = stats.probplot(series, dist="norm", fit=True)[1]
+        if qq_data is not None:
+            osm, osr = qq_data[col]["osm"], qq_data[col]["osr"]
+            slope, intercept = qq_data[col]["slope"], qq_data[col]["intercept"]
+        else:
+            series = df_eda[col].dropna()
+            osm, osr = stats.probplot(series, dist="norm", fit=False)
+            slope, intercept, _ = stats.probplot(series, dist="norm", fit=True)[1]
         qq_fig.add_trace(go.Scatter(x=osm, y=osr, mode="markers", marker=dict(color="#00d4ff", size=5), showlegend=False), row + 1, col_idx + 1)
         x_line = np.array([min(osm), max(osm)])
         y_line = slope * x_line + intercept
@@ -269,17 +372,27 @@ if qq_cols:
 st.markdown("---")
 st.markdown("#### Correlation Matrix")
 if len(num_cols) >= 2:
-    corr = df_eda[num_cols].corr()
-    fig_c = px.imshow(corr, text_auto=".2f", aspect="auto", color_continuous_scale="RdBu_r", zmin=-1, zmax=1)
-    fig_c.update_layout(height=500, **PLOTLY_THEME)
-    st.plotly_chart(fig_c, use_container_width=True)
+    if api_ref:
+        try:
+            corr_resp = api_client.eda_correlation(api_ref[0], run_id=api_ref[1])
+            corr = pd.DataFrame(corr_resp["matrix"])
+            top = pd.DataFrame(corr_resp["top_pairs"])
+        except ApiError as exc:
+            st.error(f"Could not load correlation matrix: {exc}")
+            corr, top = None, None
+    else:
+        corr = df_eda[num_cols].corr()
+        corr_flat = corr.mask(np.triu(np.ones(corr.shape, dtype=bool))).stack().reset_index()
+        corr_flat.columns = ["Feature A", "Feature B", "Correlation"]
+        corr_flat["abs"] = corr_flat["Correlation"].abs()
+        top = corr_flat.nlargest(10, "abs").drop(columns="abs")
 
-    corr_flat = corr.mask(np.triu(np.ones(corr.shape, dtype=bool))).stack().reset_index()
-    corr_flat.columns = ["Feature A", "Feature B", "Correlation"]
-    corr_flat["abs"] = corr_flat["Correlation"].abs()
-    top = corr_flat.nlargest(10, "abs").drop(columns="abs")
-    with st.expander("Top 10 correlated pairs"):
-        st.dataframe(top.reset_index(drop=True), use_container_width=True)
+    if corr is not None:
+        fig_c = px.imshow(corr, text_auto=".2f", aspect="auto", color_continuous_scale="RdBu_r", zmin=-1, zmax=1)
+        fig_c.update_layout(height=500, **PLOTLY_THEME)
+        st.plotly_chart(fig_c, use_container_width=True)
+        with st.expander("Top 10 correlated pairs"):
+            st.dataframe(top.reset_index(drop=True), use_container_width=True)
 
 st.markdown("---")
 st.markdown("#### Scatter Plot")
@@ -296,22 +409,29 @@ if len(num_cols) >= 2:
 st.markdown("---")
 st.markdown("#### Feature Variance Ranking")
 st.caption("Variance shows how much a feature spreads out. Higher variance means values are more spread and may carry more separating power, while very low variance often means the feature changes very little and may add limited signal.")
-var = df_eda[num_cols].var().sort_values(ascending=False)
-var_df = var.reset_index()
-var_df.columns = ["Feature", "Variance"]
-var_df["Interpretation"] = np.where(
-    var_df["Variance"] < max(var_df["Variance"].max() * 0.05, 0.01),
-    "Low spread",
-    np.where(var_df["Variance"] > var_df["Variance"].median(), "High spread", "Moderate spread"),
-)
-fig_v = px.bar(
-    var_df,
-    x="Feature",
-    y="Variance",
-    color="Interpretation",
-    text=var_df["Variance"].round(3),
-    color_discrete_map={"High spread": "#00d4ff", "Moderate spread": "#7c3aed", "Low spread": "#f59e0b"},
-)
-fig_v.update_traces(textposition="outside")
-fig_v.update_layout(height=360, yaxis_title="Variance (spread of values)", **PLOTLY_THEME)
-st.plotly_chart(fig_v, use_container_width=True)
+try:
+    if api_ref:
+        var_resp = api_client.eda_variance(api_ref[0], run_id=api_ref[1])["variance"]
+        var_df = pd.DataFrame(var_resp).rename(columns={"feature": "Feature", "variance": "Variance", "interpretation": "Interpretation"})
+    else:
+        var = df_eda[num_cols].var().sort_values(ascending=False)
+        var_df = var.reset_index()
+        var_df.columns = ["Feature", "Variance"]
+        var_df["Interpretation"] = np.where(
+            var_df["Variance"] < max(var_df["Variance"].max() * 0.05, 0.01),
+            "Low spread",
+            np.where(var_df["Variance"] > var_df["Variance"].median(), "High spread", "Moderate spread"),
+        )
+    fig_v = px.bar(
+        var_df,
+        x="Feature",
+        y="Variance",
+        color="Interpretation",
+        text=var_df["Variance"].round(3),
+        color_discrete_map={"High spread": "#00d4ff", "Moderate spread": "#7c3aed", "Low spread": "#f59e0b"},
+    )
+    fig_v.update_traces(textposition="outside")
+    fig_v.update_layout(height=360, yaxis_title="Variance (spread of values)", **PLOTLY_THEME)
+    st.plotly_chart(fig_v, use_container_width=True)
+except ApiError as exc:
+    st.error(f"Could not load variance ranking: {exc}")
