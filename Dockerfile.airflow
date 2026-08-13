@@ -1,0 +1,14 @@
+FROM apache/airflow:2.9.3-python3.11
+
+WORKDIR /opt/airflow
+
+COPY requirements-etl.txt ./
+# Install against Airflow's own constraints file so our extra deps don't
+# upgrade/downgrade packages Airflow itself pins (e.g. SQLAlchemy<2.0),
+# per Airflow's documented way to add packages to the image.
+RUN pip install --no-cache-dir -r requirements-etl.txt \
+    --constraint "https://raw.githubusercontent.com/apache/airflow/constraints-2.9.3/constraints-3.11.txt"
+
+COPY etl/ ./etl/
+COPY utils/ ./utils/
+COPY data_loader.py ./

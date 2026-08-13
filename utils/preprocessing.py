@@ -9,15 +9,18 @@ import zipfile
 
 import numpy as np
 import pandas as pd
-import streamlit as st
 from scipy import stats
 from sklearn.impute import SimpleImputer
 from sklearn.preprocessing import MinMaxScaler, RobustScaler, StandardScaler
 
 
-def load_uploaded_file(uploaded) -> pd.DataFrame:
-    name = uploaded.name.lower()
-    raw = uploaded.read()
+def parse_uploaded_bytes(filename: str, raw: bytes) -> pd.DataFrame:
+    """
+    Parse raw file bytes into a DataFrame. Framework-agnostic (raises
+    ValueError on bad input) so it can be reused by the ETL extract stage,
+    not just the Streamlit uploader.
+    """
+    name = filename.lower()
 
     if name.endswith(".csv"):
         return pd.read_csv(io.BytesIO(raw), low_memory=False)
@@ -26,8 +29,7 @@ def load_uploaded_file(uploaded) -> pd.DataFrame:
         with zipfile.ZipFile(io.BytesIO(raw)) as zf:
             csvs = [n for n in zf.namelist() if n.lower().endswith(".csv")]
             if not csvs:
-                st.error("No CSV found inside the ZIP archive.")
-                st.stop()
+                raise ValueError("No CSV found inside the ZIP archive.")
             return pd.read_csv(io.BytesIO(zf.read(csvs[0])), low_memory=False)
 
     if name.endswith((".xls", ".xlsx")):
@@ -49,8 +51,17 @@ def load_uploaded_file(uploaded) -> pd.DataFrame:
         df.columns = [f"feat_{c}" for c in df.columns]
         return df
 
-    st.error(f"Unsupported file type: {uploaded.name}")
-    st.stop()
+    raise ValueError(f"Unsupported file type: {filename}")
+
+
+def load_uploaded_file(uploaded) -> pd.DataFrame:
+    import streamlit as st
+
+    try:
+        return parse_uploaded_bytes(uploaded.name, uploaded.read())
+    except ValueError as exc:
+        st.error(str(exc))
+        st.stop()
 
 
 def clean_dataframe(

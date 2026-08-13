@@ -6,3 +6,5 @@ __pycache__/
 *.xls
 *.data
 .DS_Store
+.env
+airflow/logs/

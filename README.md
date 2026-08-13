@@ -83,8 +83,22 @@ DatoScope/
 │   ├── 02_clean_data.py
 │   ├── 03_eda.py
 │   └── 04_visualization.py
+├── etl/
+│   ├── config.py
+│   ├── storage.py
+│   ├── extract.py
+│   ├── transform.py
+│   ├── validate.py
+│   ├── load.py
+│   └── pipeline.py
+├── airflow/
+│   └── dags/
+│       └── datoscope_etl_dag.py
+├── docker-compose.yml
+├── Dockerfile.airflow
 ├── train.py
-└── requirements.txt
+├── requirements.txt
+└── requirements-etl.txt
 ```
 
 ## Setup
@@ -116,6 +130,40 @@ This pipeline runs:
 2. cleaning and preprocessing
 3. EDA reporting
 4. static plot generation
+
+## ETL Pipeline
+
+`etl/` is the explicit extract → transform → validate → load pipeline: it lands raw data
+(generated in-app, user-uploaded, or pulled from Kaggle) in an S3-compatible "raw" zone,
+cleans it with the same logic `utils/preprocessing.py` uses, validates it with Great
+Expectations (schema/null/range checks — the pipeline fails loudly on violation rather than
+loading bad data), and loads the result into a Postgres warehouse table.
+
+```bash
+cp .env.example .env   # then fill in KAGGLE_API_TOKEN (see comments in the file)
+
+docker compose up -d minio warehouse   # MinIO (raw/processed zones) + Postgres (warehouse)
+
+pip install -r requirements.txt
+python -c "from etl.pipeline import run_pipeline; \
+  print(run_pipeline('kaggle', dataset_name='iris', extract_kwargs={'handle': 'uciml/iris'}))"
+```
+
+`run_pipeline` also accepts `source='generated'` (pass `extract_kwargs={'df': ..., 'generator_meta': ...}`)
+and `source='uploaded'` (pass `extract_kwargs={'filename': ..., 'raw_bytes': ...}`).
+
+### Orchestrating with Airflow
+
+The same pipeline functions run as an Airflow DAG (`airflow/dags/datoscope_etl_dag.py`),
+scheduled daily against the Kaggle source:
+
+```bash
+docker compose up -d                 # brings up MinIO, warehouse, and Airflow (LocalExecutor)
+# Airflow UI at http://localhost:8080 (admin/admin)
+
+# or run/validate the DAG directly without the webserver:
+docker compose run --rm airflow-init -c "airflow dags test datoscope_etl_dag $(date +%F)"
+```
 
 ## Supported File Types
 

@@ -12,31 +12,38 @@ to also read as a Data Engineering project, not just Data Science, for the Data 
 supersedes its scope with the additions below.
 
 ## 0. Fork setup
-- [ ] Fork `tanmoyghosh704-lang/DatoScope` (default branch `mehak-work`) into your own repo,
-      clone it into this folder
-- [ ] Clean up on fork: remove committed `.DS_Store` files, fix stale README "Project Structure"
+- [x] Fork `tanmoyghosh704-lang/DatoScope` (default branch `mehak-work`) into your own repo,
+      clone it into this folder — done as a standalone repo with fresh history (not a GitHub
+      fork), pushed to https://github.com/rtrdsgpt/DatoScope-V2
+- [x] Clean up on fork: remove committed `.DS_Store` files, fix stale README "Project Structure"
       section (references deleted `Preprocessing.py`), fix `.devcontainer/devcontainer.json`
       (still references deleted `Preprocessing.py` in `openFiles`/`postAttachCommand`)
-- [ ] Add a license (currently `license: null`)
+- [x] Add a license (currently `license: null`) — MIT
 
 ## 1. ETL pipeline (new — this is the data-engineering core)
-- [ ] **Extract**: ingestion stage that lands raw data in an S3 "raw" zone — cover both paths
+- [x] **Extract**: ingestion stage that lands raw data in an S3 "raw" zone — cover both paths
       DatoScope already supports (user-uploaded files, synthetically generated datasets), plus
       add one real external source (e.g. a public dataset API/Kaggle) so the extract step isn't
-      purely synthetic
-- [ ] **Transform**: refactor the existing `utils/preprocessing.py` logic into an explicit
+      purely synthetic — `etl/extract.py` (`extract_generated`, `extract_uploaded`,
+      `extract_kaggle` via kagglehub), raw zone is MinIO locally (S3-compatible, `etl/storage.py`)
+- [x] **Transform**: refactor the existing `utils/preprocessing.py` logic into an explicit
       transform stage (cleaning, outlier handling, encoding, feature engineering) that reads from
-      the raw zone and writes to a "processed" zone — not ad hoc in-app calls
-- [ ] **Data quality validation** in the transform stage — schema/null/range checks via Great
+      the raw zone and writes to a "processed" zone — not ad hoc in-app calls — `etl/transform.py`;
+      also split `parse_uploaded_bytes` out of `utils/preprocessing.py` as a Streamlit-free pure
+      function so the ETL package doesn't need Streamlit installed
+- [x] **Data quality validation** in the transform stage — schema/null/range checks via Great
       Expectations or Pandera; fail the pipeline loudly on violation rather than silently passing
       bad data downstream (a standard real-world ETL expectation, and a differentiator vs. the
-      rest of the portfolio, which doesn't have this anywhere)
-- [ ] **Load**: load the processed/validated data into a queryable warehouse table (Postgres —
+      rest of the portfolio, which doesn't have this anywhere) — `etl/validate.py` (Great
+      Expectations, ephemeral context), raises `DataQualityError` with the full failure report
+- [x] **Load**: load the processed/validated data into a queryable warehouse table (Postgres —
       RDS in the AWS deployment, plain Postgres via docker-compose for local dev), not just
-      flat files
-- [ ] Orchestrate extract → transform → validate → load as an **Airflow DAG** (same
+      flat files — `etl/load.py`, one table per dataset plus an `etl_runs` registry table
+- [x] Orchestrate extract → transform → validate → load as an **Airflow DAG** (same
       thin-`PythonOperator`-around-shared-code pattern already proven in the Financial Anomaly
-      Detection Using RAG project's DAG — reuse that structure, don't reinvent it)
+      Detection Using RAG project's DAG — reuse that structure, don't reinvent it) —
+      `airflow/dags/datoscope_etl_dag.py`, verified with `airflow dags test` against real
+      MinIO/Postgres services (docker-compose)
 
 ## 2. API layer
 - [ ] Decouple a FastAPI backend from the Streamlit UI — expose EDA/preprocessing/modeling/
