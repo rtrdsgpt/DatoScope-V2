@@ -10,7 +10,7 @@ from __future__ import annotations
 
 from fastapi import FastAPI
 
-from api.routers import clustering, comparison, datasets, eda, modeling, models
+from api.routers import agent, clustering, comparison, copilot, datasets, eda, modeling, models
 
 app = FastAPI(title="DatoScope API", version="0.1.0")
 
@@ -20,6 +20,8 @@ app.include_router(modeling.router)
 app.include_router(clustering.router)
 app.include_router(comparison.router)
 app.include_router(models.router)
+app.include_router(copilot.router)
+app.include_router(agent.router)
 
 
 @app.get("/health")

@@ -35,10 +35,7 @@ def _numeric_columns(df: pd.DataFrame, columns: list[str] | None) -> list[str]:
     return num_cols
 
 
-@router.get("/{dataset_name}/summary")
-def summary(dataset_name: str, run_id: str | None = None, columns: list[str] | None = Query(None)) -> dict:
-    df = _get_df(dataset_name, run_id)
-    num_cols = _numeric_columns(df, columns)
+def _summary_impl(df: pd.DataFrame, num_cols: list[str]) -> dict:
     if not num_cols:
         raise HTTPException(status_code=422, detail="No numeric columns found")
     stats_df = df[num_cols].describe().T
@@ -47,12 +44,21 @@ def summary(dataset_name: str, run_id: str | None = None, columns: list[str] | N
     return {"columns": stats_df.reset_index(names="feature").to_dict(orient="records")}
 
 
-@router.get("/{dataset_name}/missing")
-def missing(dataset_name: str, run_id: str | None = None) -> dict:
+@router.get("/{dataset_name}/summary")
+def summary(dataset_name: str, run_id: str | None = None, columns: list[str] | None = Query(None)) -> dict:
     df = _get_df(dataset_name, run_id)
+    return _summary_impl(df, _numeric_columns(df, columns))
+
+
+def _missing_impl(df: pd.DataFrame) -> dict:
     miss = (df.isnull().mean() * 100).round(3)
     miss = miss[miss > 0].sort_values(ascending=False)
     return {"missing_pct": miss.to_dict()}
+
+
+@router.get("/{dataset_name}/missing")
+def missing(dataset_name: str, run_id: str | None = None) -> dict:
+    return _missing_impl(_get_df(dataset_name, run_id))
 
 
 @router.get("/{dataset_name}/distributions")
@@ -66,10 +72,7 @@ def distributions(dataset_name: str, run_id: str | None = None, columns: list[st
     return {"distributions": out}
 
 
-@router.get("/{dataset_name}/boxplot")
-def boxplot(dataset_name: str, run_id: str | None = None, columns: list[str] | None = Query(None)) -> dict:
-    df = _get_df(dataset_name, run_id)
-    num_cols = _numeric_columns(df, columns)
+def _boxplot_impl(df: pd.DataFrame, num_cols: list[str]) -> dict:
     out = {}
     for col in num_cols:
         series = df[col].dropna()
@@ -90,6 +93,12 @@ def boxplot(dataset_name: str, run_id: str | None = None, columns: list[str] | N
             "outlier_pct": round((outlier_count / len(series)) * 100, 2) if len(series) else 0.0,
         }
     return {"boxplot": out}
+
+
+@router.get("/{dataset_name}/boxplot")
+def boxplot(dataset_name: str, run_id: str | None = None, columns: list[str] | None = Query(None)) -> dict:
+    df = _get_df(dataset_name, run_id)
+    return _boxplot_impl(df, _numeric_columns(df, columns))
 
 
 @router.get("/{dataset_name}/qq")

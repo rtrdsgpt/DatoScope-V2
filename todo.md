@@ -134,13 +134,28 @@ supersedes its scope with the additions below.
       (using the Terraform + ECR images from section 5) for when you actually want to show it live
 
 ## 7. AI/agentic layer (the differentiator — not just "added MLOps to a student app")
-- [ ] LLM co-pilot that explains EDA findings and recommends preprocessing steps — a light RAG
-      layer over sklearn/statistics documentation for grounded explanations
-- [ ] An agent that can autonomously run the extract → transform → validate → load → EDA → model
+**Reordered ahead of sections 5–6 (AWS/Kubernetes)** at the user's request — no technical
+dependency requires cloud infra first; the AI layer runs entirely against the local services
+already built in sections 1–4. Runs on **Groq** (free tier, `GROQ_API_KEY`) rather than
+OpenAI/Anthropic — see log.md for why.
+- [x] LLM co-pilot that explains EDA findings and recommends preprocessing steps — a light RAG
+      layer over sklearn/statistics documentation for grounded explanations — `agent/copilot.py` +
+      `agent/rag.py`, corpus built from *installed* sklearn/scipy docstrings
+      (`scripts/06_build_rag_corpus.py`, always in sync with pinned versions, no scraping).
+      Citations are inline `[S1]` markers, deterministically verified against the actual retrieved
+      source text (not just a prompt instruction) — `POST /copilot/{name}/explain|recommend`.
+- [x] An agent that can autonomously run the extract → transform → validate → load → EDA → model
       → compare pipeline end-to-end from a natural-language goal (e.g. "find the best classifier
-      for this churn dataset") and produce a written report
-- [ ] Expose the pipeline as an **MCP server** so Claude Desktop (or the Patent Prior-Art agent's
-      tooling) can drive DatoScope's analysis tools directly
+      for this churn dataset") and produce a written report — `agent/pipeline_agent.py`
+      (`POST /agent/run`), a Groq tool-calling loop over `agent/tools.py`. Verified end-to-end
+      against live services for real, including finding and fixing a genuine hallucination bug
+      along the way (see log.md) — the agent now flags `had_tool_errors` deterministically from
+      the actual tool trace rather than only trusting its own narrative.
+- [x] Expose the pipeline as an **MCP server** so Claude Desktop (or the Patent Prior-Art agent's
+      tooling) can drive DatoScope's analysis tools directly — `agent/mcp_server.py`, same
+      `agent/tools.py` implementations the autonomous agent uses (11 tools total, including the
+      co-pilot and the agent itself). Verified over the real stdio MCP protocol (initialize,
+      list_tools, call_tool), not just that the module imports.
 
 ## 8. Tracing / observability
 - [ ] **Langfuse** for the LLM co-pilot and autonomous-agent layer specifically (sessions,

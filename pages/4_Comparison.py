@@ -30,7 +30,7 @@ if reg_res:
     st.markdown("### Regression Models")
     st.caption("Best regression model is chosen using a Generalization Score that combines test R², cross-validated R², RMSE, MAE, and overfitting gap.")
     try:
-        comparison = api_client.compare_regression(reg_res)
+        comparison = api_client.compare_regression(reg_res, dataset_name=st.session_state.dataset_name)
     except ApiError as exc:
         st.error(f"Comparison failed: {exc}")
         comparison = None
@@ -79,7 +79,7 @@ if cls_res:
     st.markdown("### Classification Models")
     st.caption("Best classification model is chosen by highest Macro F1, which treats all classes more fairly than plain accuracy when class sizes differ.")
     try:
-        comparison_c = api_client.compare_classification(cls_res)
+        comparison_c = api_client.compare_classification(cls_res, dataset_name=st.session_state.dataset_name)
     except ApiError as exc:
         st.error(f"Comparison failed: {exc}")
         comparison_c = None
@@ -127,7 +127,7 @@ if clust_res:
     st.markdown("### Clustering Models")
     st.caption("Best clustering model is chosen by the algorithm that wins the largest number of available clustering metrics across the five tracked scores.")
     try:
-        comparison_cl = api_client.compare_clustering(clust_res)
+        comparison_cl = api_client.compare_clustering(clust_res, dataset_name=st.session_state.dataset_name)
     except ApiError as exc:
         st.error(f"Comparison failed: {exc}")
         comparison_cl = None

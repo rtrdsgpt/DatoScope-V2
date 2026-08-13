@@ -518,3 +518,175 @@ deliberately not built — explained below.
 - `ruff check .` — clean pass after the config scoping + real dead-code removal above.
 - Full `pytest` suite (98 unit tests) re-run after the ruff-driven import removals — still 98/98,
   confirming the "unused" imports really were unused and nothing broke.
+
+---
+
+## Section 7 — AI/agentic layer (done ahead of sections 5–6, at user's request)
+
+**Progress:** grounded LLM co-pilot (EDA explanations + preprocessing recommendations, RAG over
+installed sklearn/scipy docstrings, verified citations), an autonomous pipeline agent (goal →
+extract/clean/EDA/train/compare → written report), and an MCP server exposing all of it — all
+running on Groq's free tier. Verified end-to-end against live services, including finding and
+fixing a real agent hallucination bug during that verification, not after.
+
+**Decisions**
+- **Reordered ahead of sections 5–6** — user's explicit request. No technical dependency requires
+  AWS/Kubernetes first; the AI layer runs entirely against the local services sections 1–4 already
+  built (warehouse, MinIO, the API, MLflow). CD from section 4 stays deferred until 5–6 exist.
+- **LLM provider: Groq, not OpenAI or Anthropic** — went through a real decision chain, not a
+  first-choice: OpenAI was the user's first pick, but the provided key had zero billing credits
+  (confirmed via a real API call, not assumed from the key format). Considered Ollama next (already
+  installed locally with a model pulled, zero cost) but its pulled model (`gemma4:e4b`) doesn't
+  reliably support tool/function calling, which the autonomous agent genuinely needs — pulling a
+  tool-calling-capable model was one option, but the user chose Groq's free tier instead. A
+  `GROQ_API_KEY` was found already configured (as a comma-separated 5-key rotation pool) in a
+  sibling project's `.env` at the user's direction, confirmed working with a real call before
+  building anything on it.
+- **Groq key rotation reused verbatim from the sibling Financial-Anomaly-Detection-Using-RAG
+  project** (`agent/groq_client.py`, adapted from that project's `groq_key_rotation.py`) rather
+  than reimplemented — same problem (a free-tier key's rate limit burns through mid-run), same
+  proven solution, at the user's explicit direction ("No add rotation pool instead, Groq exhausts
+  fast") after an initial attempt to just use the first key was rejected.
+- **RAG corpus built from installed package docstrings** (`scripts/06_build_rag_corpus.py`,
+  `inspect.getdoc()` over a curated list of the exact sklearn/scipy symbols DatoScope's
+  preprocessing/modeling/EDA code uses) rather than authored prose — user's explicit choice,
+  always in sync with the pinned dependency versions, no scraping or network fetch of arbitrary
+  doc pages. 33 chunks, embedded locally with `sentence-transformers/all-MiniLM-L6-v2` (free, no
+  API), retrieved via plain numpy cosine similarity — the corpus is a few dozen short chunks,
+  nowhere near large enough to justify a real vector database.
+- **Citation verification adapted from the same sibling project's `grounded_explainer.py`
+  pattern**: the model must cite `[S1]`-style markers with an exact quoted substring, which is
+  then deterministically checked against the actual retrieved source text — a real hallucination
+  guard, not a prompt instruction the model may or may not follow. `unverified_citation_markers`
+  in the response surfaces anything that didn't check out rather than silently trusting the model.
+- **`agent/tools.py` wraps `utils/api_client.py` rather than reimplementing HTTP calls** — the
+  same already-built, already-tested client from section 2's Streamlit rewire, reused for a third
+  caller (the autonomous agent and the MCP server both import from `agent/tools.py`, which itself
+  is just a thin trimming layer over `api_client`). One implementation, three callers total
+  (Streamlit, the agent, MCP), not three copies of the same HTTP logic.
+- **Training tools trim their output to only the metric fields `utils.comparison` actually reads**
+  (dropping `y_test`/`y_pred`/confusion matrices/coefficients/cluster labels) — small enough for
+  an LLM tool-call round trip, and this is what makes `compare_models` work by just forwarding a
+  train_* tool's own output back in as its `results` argument, with no need for the agent to
+  reconstruct or re-fetch anything.
+- **Tool-calling JSON schemas are generated from `agent/tools.py`'s function signatures**
+  (`agent/schema_gen.py`, via `typing.get_type_hints` + docstring parsing) rather than
+  hand-maintained alongside the implementations — keeps the two from drifting apart by
+  construction rather than by discipline.
+- **MCP pinned to `mcp>=1.2.0,<2.0.0`** — `pip install mcp` resolved 2.0.0, which restructured the
+  server API entirely (no more `mcp.server.fastmcp.FastMCP`, the class the sibling project's
+  working MCP server is built on and the pattern this one follows). Rather than reverse-engineer
+  the new 2.0 API from scratch, pinned to the well-documented 1.x line (1.29.0) that has the
+  proven `FastMCP` class.
+
+**Mistakes & fixes**
+1. **`agent/schema_gen.py` produced silently wrong tool schemas on the first pass** — every
+   `list[str]` parameter came back as `{"type": "string"}` and every `bool` as `{"type":
+   "string"}` too, and tool descriptions truncated mid-sentence. Root cause: `agent/tools.py` uses
+   `from __future__ import annotations`, which stringifies every annotation at definition time
+   ("list[str]" as literal text, not a type object); `inspect.signature(func).parameters[name]
+   .annotation` returns that raw string, and `typing.get_origin()`/dict-lookup on a string just
+   silently falls through to the default. Fixed by resolving annotations through
+   `typing.get_type_hints(func)` instead, which properly evaluates the postponed forward
+   references back into real type objects. Caught by actually printing a generated schema and
+   inspecting it before trusting it, not by assuming the generator worked because it didn't crash.
+2. **Calling `api/routers/eda.py`'s route handlers directly (not through HTTP) crashed** —
+   `api/routers/copilot.py`'s `_build_findings` called `summary(dataset_name, run_id)` as a plain
+   Python function to build the co-pilot's context, and it crashed with `TypeError: 'Query' object
+   is not iterable`. Root cause: `summary`'s `columns` parameter defaults to FastAPI's `Query(None)`
+   marker, which is only resolved into a real value by FastAPI's request-handling machinery — call
+   the function directly and `columns` is the raw `Query` object, not `None` or a list. Same bug
+   existed in `agent/mcp_server.py`'s two copilot tools, which made the identical direct call.
+   Fixed by extracting the actual computation out of `summary`/`missing`/`boxplot` into plain
+   functions (`_summary_impl`, `_missing_impl`, `_boxplot_impl`) that take an already-fetched
+   DataFrame and plain column list — no FastAPI markers anywhere in them — with the route handlers
+   now thin wrappers that fetch the df and delegate. `copilot.py` and `mcp_server.py` both call the
+   plain versions (the latter via `copilot.py`'s `_build_findings`, not duplicated).
+3. **The citation verifier flagged every legitimate citation as unverified** on the first real
+   grounded-answer test — the model's `source_text` was word-for-word correct but never
+   substring-matched because docstrings wrap mid-sentence with embedded newlines
+   ("...divided by the square of the\nvariance...") while the model naturally quotes the same text
+   as flowing single-line prose (correctly — that's what an accurate quote of wrapped text looks
+   like). Fixed by normalizing whitespace on both sides of the comparison before checking. Verified
+   the fix didn't just make the check pass-everything by separately confirming it still correctly
+   flags a genuinely fabricated citation.
+4. **The autonomous agent hallucinated a complete, confident success report after every substantive
+   tool call had actually failed.** First real end-to-end run: the model invented a placeholder
+   `run_id="cleaning_run"` for `clean_dataset` (rather than reusing the real run_id
+   `generate_dataset` had just returned, or omitting the optional parameter), which cascaded — every
+   subsequent step (`clean_dataset`, `eda_summary`, `train_classification`, `compare_models`) failed
+   with real, correctly-surfaced errors — and the model's final report ignored all of that and wrote
+   a specific, plausible-looking success narrative (fabricated accuracy/precision/recall numbers
+   for a model that was never trained). This is a serious problem for an "autonomous agent produces
+   a written report" feature: a fabricated report is worse than an obvious failure, because it
+   looks trustworthy. Three fixes, not one:
+   - Rewrote the system prompt with explicit, direct rules: never invent an identifier (run_id,
+     column name, etc.) — use only literal values from the goal or values verbatim from a previous
+     tool result; most `run_id` parameters are optional and mean "use the latest" when omitted, so
+     omit rather than inventing a placeholder; a tool result containing an `"error"` key means that
+     step failed and must not be treated as a success or built upon; final-report numbers must come
+     only from actual tool results, never asserted from memory.
+   - Added a **deterministic integrity check independent of the model's own narrative**: the agent
+     loop scans its own tool-call trace for any result containing `"error"` and returns
+     `had_tool_errors: true/false` in the response alongside the free-text report — a caller (or a
+     human) doesn't have to trust the model's self-assessment of whether the run actually worked.
+   - `agent/tools.py`'s `compare_models` now validates its `results` argument is actually a dict of
+     dicts and raises a clear, specific error otherwise, instead of crashing later inside
+     `score_classification_models` with a cryptic `TypeError: string indices must be integers, not
+     'str'` when handed a failed upstream result.
+
+   Re-running the identical goal after these fixes: the model correctly omitted `run_id`, the
+   pipeline ran for real, and the report's numbers matched the actual tool results exactly
+   (cross-checked figure by figure, not just eyeballed) — `had_tool_errors` still correctly showed
+   `true` because one *earlier* attempt within the same run failed (the model retried with corrected
+   feature names and it worked the second time — a normal, honest instance of an error being
+   surfaced and having the agent recover from it, exactly the intended behavior, as opposed to the
+   first run's outright fabrication).
+5. **Groq/llama-3.3-70b reliably reads a large tool *result* but sometimes fails to reproduce it
+   verbatim as a tool *call* argument a couple of turns later** — observed directly: the model
+   passed the literal string `"classification_results"` as `compare_models`'s `results` argument
+   instead of the actual JSON object `train_classification` had just returned. Rather than assume
+   this always happens (a later, cleaner run showed the model *did* echo the JSON back correctly on
+   its own), added a self-healing fallback specifically in `agent/pipeline_agent.py`'s
+   orchestration loop (not in the shared `agent/tools.py`, to avoid weakening the explicit-argument
+   contract for the MCP server / other callers): every successful `train_*` call's real output is
+   cached by task, and if the model's own `compare_models` call doesn't supply a valid dict, the
+   cached value is substituted transparently before the tool actually runs.
+6. **A real, previously-undiscovered gap in `utils/api_client.py` — not new agent code — was
+   found because the agent's `compare_models` result showed `"mlflow_registration": null"` for a
+   comparison call that included `dataset_name`.** Investigating (by reproducing the exact same
+   request directly against `/comparison/classification` with `dataset_name` manually included,
+   which *did* register the model) revealed that `api_client.compare_regression/classification/
+   clustering` — built in section 2, used by both `pages/4_Comparison.py` and now
+   `agent/tools.py` — never accepted or forwarded a `dataset_name` parameter at all. This meant
+   `POST /comparison/*`'s server-side MLflow-registration-on-comparison-winner (section 4) had
+   **never actually been reachable from the real Streamlit app**, only from raw curl calls made
+   during section 4's own verification — a gap between two sections built in different sessions
+   that neither session's testing happened to cross. Fixed in two places: `api_client.py`'s three
+   `compare_*` functions now take and forward an optional `dataset_name`, and `pages/4_Comparison.py`
+   was updated to actually pass `st.session_state.dataset_name` through at all three call sites —
+   completing wiring that section 4 believed was already done. Also hardened `agent/tools.py`'s
+   `compare_models` to surface `mlflow_error` from a failed registration attempt instead of
+   silently swallowing it (`except api_client.ApiError: pass`), which is what made this gap harder
+   to notice in the first place — a `mlflow_registration: null` with no accompanying error message
+   looks identical to "registration wasn't attempted" and "registration was attempted and failed."
+
+**Verification performed** (real Groq calls, real warehouse data, real MCP protocol — not written
+and assumed correct):
+- Retrieval: ran 4 different EDA-style queries against the real 33-chunk corpus and inspected the
+  actual top-3 results for topical relevance before building the co-pilot on top of it.
+- Citation verification: confirmed both directions — a real grounded answer's legitimate citations
+  pass, and a hand-constructed fabricated citation against the same source chunk is correctly
+  flagged — not just "it ran without erroring."
+- `POST /copilot/{name}/explain` and `/recommend` — real HTTP calls against a real cleaned dataset,
+  inspected full grounded answers and confirmed `unverified_citation_markers` was empty.
+- `POST /agent/run` — four full end-to-end runs against real live services while iterating on the
+  hallucination fix (see Mistakes #4–6 above), the last of which was cross-checked figure-by-figure
+  against the actual tool-call trace, not just read for plausibility.
+- MCP server: a real client session over the actual stdio transport (`mcp.client.stdio
+  .stdio_client` + `ClientSession`) — `initialize()`, `list_tools()` (confirmed all 11 tools
+  registered), and `call_tool()` for both `eda_summary` (real warehouse data returned) and
+  `explain_eda_finding` (a full grounded, cited answer returned over the protocol) — not just that
+  `agent/mcp_server.py` imports without error.
+- Warehouse cleanup: dropped all `*_test`/`agent_demo*` tables and their `etl_runs` rows after
+  verification, same hygiene as sections 3–4.

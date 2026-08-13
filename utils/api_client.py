@@ -160,14 +160,18 @@ def run_clustering(dataset_name: str, **payload) -> dict:
 
 
 # --- comparison ---------------------------------------------------------
+# dataset_name is optional (comparison works without it) but required for
+# the API to register the winning model into the MLflow Model Registry —
+# omitting it silently skips registration rather than erroring, so it's
+# easy to forget; pass it whenever the caller has one.
 
-def compare_regression(results: dict) -> dict:
-    return _post("/comparison/regression", {"results": results})
+def compare_regression(results: dict, dataset_name: str | None = None) -> dict:
+    return _post("/comparison/regression", {"results": results, "dataset_name": dataset_name})
 
 
-def compare_classification(results: dict) -> dict:
-    return _post("/comparison/classification", {"results": results})
+def compare_classification(results: dict, dataset_name: str | None = None) -> dict:
+    return _post("/comparison/classification", {"results": results, "dataset_name": dataset_name})
 
 
-def compare_clustering(results: dict) -> dict:
-    return _post("/comparison/clustering", {"results": results})
+def compare_clustering(results: dict, dataset_name: str | None = None) -> dict:
+    return _post("/comparison/clustering", {"results": results, "dataset_name": dataset_name})

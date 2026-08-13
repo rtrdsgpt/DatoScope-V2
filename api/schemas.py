@@ -94,3 +94,18 @@ class ClusteringRequest(BaseModel):
 class ComparisonRequest(BaseModel):
     results: dict
     dataset_name: str | None = None  # if set, the winner is registered into the MLflow Model Registry (Staging)
+
+
+class CopilotExplainRequest(BaseModel):
+    run_id: str | None = None
+    question: str
+
+
+class CopilotRecommendRequest(BaseModel):
+    run_id: str | None = None
+
+
+class AgentRunRequest(BaseModel):
+    goal: str
+    dataset_name: str | None = None  # if omitted, the agent may generate one to satisfy the goal
+    max_turns: int = 15

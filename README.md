@@ -85,7 +85,9 @@ DatoScope/
 │   ├── 01_generate_data.py
 │   ├── 02_clean_data.py
 │   ├── 03_eda.py
-│   └── 04_visualization.py
+│   ├── 04_visualization.py
+│   ├── 05_export_production_model.py
+│   └── 06_build_rag_corpus.py
 ├── etl/
 │   ├── config.py
 │   ├── storage.py
@@ -105,7 +107,17 @@ DatoScope/
 │       ├── modeling.py
 │       ├── clustering.py
 │       ├── comparison.py
-│       └── models.py
+│       ├── models.py
+│       ├── copilot.py
+│       └── agent.py
+├── agent/
+│   ├── groq_client.py       # multi-key rotation for Groq's free tier
+│   ├── rag.py                # retrieval over rag_corpus.pkl (built by scripts/06_...)
+│   ├── copilot.py             # grounded EDA explanations + preprocessing recommendations
+│   ├── tools.py                 # shared tool functions — used by both of the below
+│   ├── schema_gen.py             # generates tool-calling JSON schemas from tools.py's signatures
+│   ├── pipeline_agent.py          # autonomous goal -> pipeline -> report agent
+│   └── mcp_server.py                # exposes agent/tools.py + copilot for Claude Desktop
 ├── airflow/
 │   └── dags/
 │       └── datoscope_etl_dag.py
@@ -219,6 +231,67 @@ colliding. From there:
   the winner into the MLflow Model Registry (see MLOps below)
 - `GET /models/{name}/versions`, `POST /models/{name}/promote` — MLflow Model Registry (Staging →
   Production)
+- `POST /copilot/{name}/explain|recommend`, `POST /agent/run` — see AI Co-Pilot & Agent below
+
+## AI Co-Pilot & Agent
+
+`agent/` is the differentiator layer (`todo.md` section 7) — a grounded LLM co-pilot, an
+autonomous pipeline agent, and an MCP server, all built on the same tool implementations
+(`agent/tools.py`, thin wrappers around `utils/api_client.py`) and running on Groq (free tier;
+`GROQ_API_KEY` in `.env`, comma-separate multiple keys for round-robin rotation when one hits a
+rate limit — see `agent/groq_client.py`).
+
+### Grounded co-pilot
+
+`POST /copilot/{name}/explain` and `POST /copilot/{name}/recommend` answer questions about a
+cleaned dataset's EDA findings and recommend preprocessing steps, grounded in a RAG corpus built
+from the *installed* sklearn/scipy docstrings (`scripts/06_build_rag_corpus.py` — always in sync
+with the pinned versions, no scraping). Citations are inline `[S1]`-style markers the model is
+required to use; each cited quote is then deterministically checked against the actual retrieved
+source text (`agent/copilot.py`'s `_verify`) — a real hallucination guard, not just a prompt
+instruction the model may or may not follow. `unverified_citation_markers` in the response flags
+anything that didn't check out.
+
+```bash
+python scripts/06_build_rag_corpus.py   # once, or whenever CORPUS_SYMBOLS/sklearn version changes
+curl -X POST http://localhost:8000/copilot/<dataset_name>/explain \
+  -H "Content-Type: application/json" -d '{"question": "Why is x1 skewed?"}'
+```
+
+### Autonomous pipeline agent
+
+`POST /agent/run` takes a natural-language goal (e.g. *"find the best classifier for this churn
+dataset"*) and runs a Groq tool-calling loop over `agent/tools.py` — generate/pull a dataset,
+clean it, EDA, train, compare — producing a written report. The response's `had_tool_errors` flag
+is a deterministic integrity check independent of the model's own narrative: an LLM asked to
+summarize a run where a step failed will sometimes write a confident success story around
+fabricated numbers instead of reporting the failure (this was caught and fixed during
+verification — see `log.md`), so this flag is set by scanning the actual tool-call trace for
+error results, not by trusting the report text.
+
+```bash
+curl -X POST http://localhost:8000/agent/run -H "Content-Type: application/json" -d '{
+  "goal": "Generate a synthetic classification dataset and find the best classifier for it."
+}'
+```
+
+### MCP server
+
+`agent/mcp_server.py` exposes every tool (dataset ops, training, comparison, the grounded
+co-pilot, and the autonomous agent itself) over stdio so Claude Desktop can drive DatoScope
+directly — the pipeline's tools, not a separate reimplementation of them. Requires the API running
+(`API_BASE_URL`, defaults to `http://localhost:8000`).
+
+```json
+{
+  "mcpServers": {
+    "datoscope": {
+      "command": "/absolute/path/to/DatoScope V2/.venv/bin/python",
+      "args": ["/absolute/path/to/DatoScope V2/agent/mcp_server.py"]
+    }
+  }
+}
+```
 
 ## Testing
 
