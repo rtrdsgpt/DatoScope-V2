@@ -71,13 +71,16 @@ DatoScope/
 │   ├── 3_Clustering.py
 │   └── 4_Comparison.py
 ├── utils/
+│   ├── api_client.py
 │   ├── app_state.py
+│   ├── comparison.py
 │   ├── data_input.py
 │   ├── generators.py
 │   ├── io.py
 │   ├── modeling.py
 │   ├── preprocessing.py
 │   └── ui.py
+├── tests/
 ├── scripts/
 │   ├── 01_generate_data.py
 │   ├── 02_clean_data.py
@@ -206,6 +209,24 @@ colliding. From there:
   plotting + the scaled feature matrix (used client-side for the dendrogram/elbow diagnostics)
 - `POST /comparison/regression|classification|clustering` — stateless winner-selection over a set
   of already-computed model metrics (shared with the API via `utils/comparison.py`)
+
+## Testing
+
+```bash
+pip install -r requirements.txt -r requirements-dev.txt
+pytest                    # unit tests only — pure functions, no external services, ~3s
+pytest -m integration     # also exercises the real ETL pipeline end to end
+```
+
+The integration tests (`tests/test_etl_load.py`, `tests/test_etl_pipeline.py`) need a live
+warehouse — `docker compose up -d minio warehouse` first, or they skip automatically. Everything
+else (`utils/preprocessing.py`, `utils/modeling.py`, `utils/generators.py`, `utils/comparison.py`,
+and the ETL `transform`/`extract`/`validate` stages) runs with no external services: S3 calls are
+mocked with `moto`, and Great Expectations runs in an ephemeral in-process context.
+
+`tests/test_etl_validate.py` is the data-quality test layer specifically — it feeds known-bad
+fixtures (missing required columns, excess nulls, out-of-range values, empty tables) through
+`etl/validate.py` and asserts they're rejected, not just that clean data passes.
 
 ## Supported File Types
 

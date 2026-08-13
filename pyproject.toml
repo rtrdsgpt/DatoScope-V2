@@ -1,0 +1,5 @@
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+markers = [
+    "integration: requires live MinIO/Postgres (docker compose up -d minio warehouse)",
+]

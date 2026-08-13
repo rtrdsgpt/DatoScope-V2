@@ -329,3 +329,74 @@ just "no exception raised"):
   dendrogram.
 - Zero console/page errors across the entire flow (generate → clean → EDA → model → compare →
   cluster).
+
+---
+
+## Section 3 — Testing
+
+**Progress:** `tests/` — 107 tests total, all passing: 98 pure-function unit tests (no external
+services, ~3s) plus 9 `@pytest.mark.integration` tests against the real docker-compose warehouse,
+verified passing against live services (not just written).
+
+**Decisions**
+- **`moto` mocks S3 for the ETL unit tests** (`test_etl_extract.py`, `test_etl_transform.py`)
+  instead of requiring live MinIO. Hit and worked around a real limitation: moto only intercepts
+  the default AWS endpoint pattern, not an arbitrary custom `endpoint_url` like MinIO's — so
+  `ObjectStore(Settings(s3_endpoint_url=None, ...))` is used specifically under `mock_aws()`,
+  letting boto3 hit the (moto-intercepted) default AWS endpoint instead of trying to reach a real
+  `localhost:9000`. This is a `moto`-specific test-setup detail, not a change to `etl/storage.py`
+  itself.
+- **`etl/load.py` and `etl/pipeline.py` are integration-only** (`@pytest.mark.integration`,
+  skipped automatically if Postgres/MinIO aren't reachable) rather than mocked — Postgres-specific
+  SQL (`TIMESTAMPTZ`, `ON CONFLICT`) doesn't have a good lightweight substitute (sqlite isn't a
+  faithful stand-in), and the value of testing the real warehouse round-trip outweighs the cost of
+  requiring `docker compose up -d minio warehouse` for that subset. Matches the verification bar
+  from sections 1–2: actually run against live services, don't just assert the code "should" work.
+- **Integration tests use randomly-suffixed `pytest_<uuid>` dataset names** so repeated/parallel
+  runs don't collide in the shared warehouse, and the `warehouse_engine` fixture drops any
+  `ds_pytest_*` tables and `etl_runs` rows it created in teardown — confirmed empty
+  (`SELECT ... WHERE dataset_name LIKE 'pytest_%'` → 0 rows) after a full run, so the test suite
+  doesn't leave debris in a database also used for manual dev/demo work.
+- **`etl/validate.py` (Great Expectations) needed no infrastructure at all** — its ephemeral
+  context runs fully in-process — so the data-quality test layer todo.md explicitly asks for
+  (`tests/test_etl_validate.py`) is a plain unit test file: missing required columns, >max-null
+  columns, empty tables, and out-of-bounds values (a synthetic `age` column with -5/150) each
+  confirmed to raise `DataQualityError` carrying the specific failed-expectation type, not a bare
+  assertion that *something* failed.
+- **UI-layer code (`utils/api_client.py`, `utils/app_state.py`, `utils/data_input.py`,
+  `utils/ui.py`) is intentionally 0% covered by this suite** — todo.md section 3 scopes testing to
+  `preprocessing`/`modeling`/`generators`/ETL transform+validation, and that code was already
+  exercised for real in section 2's Playwright browser pass; unit-testing Streamlit widget code
+  needs heavy mocking for little signal beyond what the browser test already gave.
+
+**Mistakes & fixes**
+- **A real production bug, found by writing a test, not by reading the code**:
+  `TestClassificationGenerator::test_imbalanced_weights_produce_skewed_classes` and the
+  `generate_dataset` dispatcher's `"Imbalanced Classes"` case both failed with
+  `AttributeError: 'tuple' object has no attribute 'copy'` — `utils/generators.py`'s
+  `gen_classification` passes `weights` straight through to `sklearn.datasets.make_classification`,
+  which internally calls `.copy()` on it; a tuple (what `gen_classification`'s own type hint and
+  the dispatcher's `weights=(0.82, 0.18)` both use) doesn't have that method on the installed
+  sklearn (1.9.0). This means **selecting "Imbalanced Classes" as a classification dataset type
+  in the live app would have crashed** — a real, user-facing bug that existed before this session
+  and had nothing to do with the ETL/API work. Fixed with a one-line cast
+  (`weights=list(weights) if weights is not None else None`) in `gen_classification`, which fixes
+  both the direct call and the dispatcher path since they share the same function.
+- A handful of ordinary test-authoring mistakes, not product bugs, caught immediately by actually
+  running the suite rather than assuming: `make_classification` fixture params summing to more
+  features than requested (`n_informative + n_redundant + n_repeated > n_features`), and a
+  `pd.testing.assert_frame_equal` that compared a freshly-`to_parquet`-round-tripped DataFrame
+  (fresh `RangeIndex`) against the in-memory one (retains the original, non-contiguous index after
+  `clean_dataframe` drops an outlier row) — fixed by `.reset_index(drop=True)` before comparing,
+  since the index itself was never a meaningful part of what that test was checking.
+
+**Verification performed:**
+- `pytest -m "not integration"` — 98/98 pass in ~3s, no external services running.
+- `pytest -m integration` with no services running — all 9 correctly *skip* (not error), proving
+  the skip-gracefully behavior actually works rather than assuming it does.
+- `docker compose up -d minio warehouse`, then `pytest -m integration` — all 9 pass for real
+  against live Postgres/MinIO; confirmed zero `pytest_*` rows left in `etl_runs` afterward.
+- Full combined run (`pytest tests/ --cov=utils --cov=etl`) with services up: 107/107 pass.
+  Coverage on the modules todo.md section 3 asked for: `utils/preprocessing.py` 84%,
+  `utils/modeling.py` 94%, `utils/generators.py` 99%, `utils/comparison.py` 96%,
+  `etl/validate.py`/`etl/transform.py`/`etl/load.py` 100%, `etl/extract.py` 98%.

@@ -65,10 +65,19 @@ supersedes its scope with the additions below.
       throughout.
 
 ## 3. Testing
-- [ ] pytest suite for `utils/preprocessing.py`, `utils/modeling.py`, `utils/generators.py`, and
-      the new ETL transform/validation functions — pure-function-heavy, easy wins
-- [ ] A data-quality test layer: assert the Great Expectations/Pandera checks actually catch bad
-      data (feed known-bad fixtures through the transform stage)
+- [x] pytest suite for `utils/preprocessing.py`, `utils/modeling.py`, `utils/generators.py`, and
+      the new ETL transform/validation functions — pure-function-heavy, easy wins — `tests/`, 107
+      tests total (98 pure-function unit tests with no external services — S3 mocked via `moto`,
+      Great Expectations runs in-process — plus 9 `@pytest.mark.integration` tests against the
+      real docker-compose warehouse for `etl/load.py`/`etl/pipeline.py`, verified passing against
+      live services with automatic cleanup of test data). Found and fixed a real bug along the
+      way: `gen_classification`'s "Imbalanced Classes" path was completely broken on the installed
+      sklearn version (tuple `weights` vs. the `.copy()` call `make_classification` needs) — see
+      log.md.
+- [x] A data-quality test layer: assert the Great Expectations/Pandera checks actually catch bad
+      data (feed known-bad fixtures through the transform stage) — `tests/test_etl_validate.py`:
+      missing required columns, excess nulls, empty tables, and out-of-range values all confirmed
+      to raise `DataQualityError` with the correct failure report, not just that clean data passes
 
 ## 4. MLOps
 - [ ] Docker/docker-compose for FastAPI + Streamlit + local Postgres (dev stack)

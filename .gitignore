@@ -8,3 +8,5 @@ __pycache__/
 .DS_Store
 .env
 airflow/logs/
+.coverage
+.pytest_cache/

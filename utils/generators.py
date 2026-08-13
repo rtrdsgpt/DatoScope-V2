@@ -303,7 +303,7 @@ def gen_classification(
         n_redundant=max(0, min(2, n_features - min(n_informative, n_features))),
         n_repeated=0,
         n_classes=2,
-        weights=weights,
+        weights=list(weights) if weights is not None else None,
         flip_y=flip_y,
         class_sep=class_sep,
         random_state=seed,
