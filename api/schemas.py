@@ -93,3 +93,4 @@ class ClusteringRequest(BaseModel):
 
 class ComparisonRequest(BaseModel):
     results: dict
+    dataset_name: str | None = None  # if set, the winner is registered into the MLflow Model Registry (Staging)

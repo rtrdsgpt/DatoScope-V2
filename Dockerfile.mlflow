@@ -1,0 +1,9 @@
+FROM python:3.11-slim
+
+WORKDIR /mlflow
+
+RUN pip install --no-cache-dir mlflow psycopg2-binary boto3
+
+COPY docker/mlflow_entrypoint.py ./
+
+ENTRYPOINT ["python", "mlflow_entrypoint.py"]

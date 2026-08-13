@@ -80,15 +80,35 @@ supersedes its scope with the additions below.
       to raise `DataQualityError` with the correct failure report, not just that clean data passes
 
 ## 4. MLOps
-- [ ] Docker/docker-compose for FastAPI + Streamlit + local Postgres (dev stack)
-- [ ] **MLflow** — log every model-comparison run (existing `pages/4_Comparison.py` already
+- [x] Docker/docker-compose for FastAPI + Streamlit + local Postgres (dev stack) — `Dockerfile`
+      (shared by the new `api`/`streamlit` docker-compose services, different `command:` each);
+      `docker compose up -d --build` now brings up the entire stack (MinIO, warehouse, MLflow,
+      Airflow, API, Streamlit) in one command
+- [x] **MLflow** — log every model-comparison run (existing `pages/4_Comparison.py` already
       computes R²/accuracy/Fowlkes-Mallows/Rand Index per model) as MLflow runs with
       params/metrics/artifacts; promote the best model per dataset-type to the **MLflow Model
-      Registry** (staging → production stages) rather than just logging runs
-- [ ] **DVC** for the processed datasets and model artifacts, with an **S3 remote** — this is the
-      natural bridge between DVC and the AWS story below, not a separate concern
-- [ ] **CI/CD** (GitHub Actions): CI job = lint + pytest on push; CD job = build the Docker image,
-      push to **ECR**, then deploy to the Kubernetes cluster (see below) — one workflow, two jobs
+      Registry** (staging → production stages) rather than just logging runs — `api/tracking.py`
+      + `Dockerfile.mlflow`/`docker/mlflow_entrypoint.py` (tracking server backed by a new
+      `mlflow` database in the warehouse Postgres + a new `datoscope-mlflow` MinIO bucket, both
+      auto-created — no new infrastructure). Every regression/classification/clustering model
+      trained via the API is logged as its own run; `/comparison/*` registers the winner and
+      stages it automatically when called with `dataset_name`; `POST /models/{name}/promote`
+      moves Staging → Production. Verified end-to-end against live services for all three task
+      types, including the promotion/versions endpoints and their 404 error paths.
+- [x] **DVC** for the processed datasets and model artifacts, with an **S3 remote** — this is the
+      natural bridge between DVC and the AWS story below, not a separate concern. Scoped to
+      **model artifacts only** (processed data lives in the warehouse, not flat files, per section
+      1 — see log.md): MinIO remote (`datoscope-models` bucket), `scripts/
+      05_export_production_model.py` pulls a registered model's Production version out of MLflow
+      and writes it in the same payload shape the API's model-download endpoint uses. `dvc add` /
+      `dvc push` / `dvc pull` verified end-to-end against live MinIO (round-tripped a real
+      Production model through delete-and-restore).
+- [x] **CI/CD** (GitHub Actions): CI job = lint + pytest on push; CD job = build the Docker image,
+      push to **ECR**, then deploy to the Kubernetes cluster (see below) — one workflow, two jobs.
+      CI done: `.github/workflows/ci.yml` (ruff + pytest, integration tests self-skip with no
+      services running). **CD deliberately deferred** — it needs the ECR repo and K8s cluster from
+      sections 5–6, which don't exist yet; building it now would mean either a non-functional stub
+      or infrastructure decisions made out of order. Revisit once sections 5–6 are done.
 
 ## 5. AWS
 - [ ] **S3**: raw and processed data-lake zones (feeding the ETL pipeline above), plus the DVC

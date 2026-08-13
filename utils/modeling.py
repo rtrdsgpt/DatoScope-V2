@@ -281,7 +281,7 @@ def run_clustering_models(
         labels = algo.fit_predict(X_scaled)
         unique = np.unique(labels[labels != -1])
         n_clust = len(unique)
-        row = {"labels": labels, "n_clusters": n_clust}
+        row = {"model": algo, "labels": labels, "n_clusters": n_clust}
 
         if n_clust >= 2 and len(unique) < len(X_scaled):
             mask = labels != -1

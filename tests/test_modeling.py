@@ -2,7 +2,6 @@ from __future__ import annotations
 
 import pickle
 
-import numpy as np
 import pandas as pd
 import pytest
 from sklearn.datasets import make_blobs, make_classification, make_regression

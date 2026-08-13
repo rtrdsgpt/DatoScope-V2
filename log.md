@@ -400,3 +400,121 @@ verified passing against live services (not just written).
   Coverage on the modules todo.md section 3 asked for: `utils/preprocessing.py` 84%,
   `utils/modeling.py` 94%, `utils/generators.py` 99%, `utils/comparison.py` 96%,
   `etl/validate.py`/`etl/transform.py`/`etl/load.py` 100%, `etl/extract.py` 98%.
+
+---
+
+## Section 4 — MLOps
+
+**Progress:** full dev-stack docker-compose (api + streamlit services, shared `Dockerfile`),
+MLflow tracking + Model Registry wired into every training/comparison endpoint, DVC tracking
+Production model artifacts against a MinIO remote, and a CI workflow (lint + pytest). CD
+deliberately not built — explained below.
+
+**Decisions**
+- **CD deferred entirely, not stubbed** — user's explicit choice over the alternatives (stub the
+  ECR/K8s steps as no-ops, or pause section 4 and go build sections 5–6 first). The CD job as
+  specced (build → push to ECR → deploy to K8s) needs infrastructure that doesn't exist yet; a
+  stub would be dead YAML nobody would remember to finish, and reordering sections would break the
+  numbering/narrative of `todo.md`. Only the CI job (`.github/workflows/ci.yml`) exists for now.
+- **MLflow backend: the existing warehouse Postgres + MinIO, not new infrastructure** — user's
+  explicit choice over SQLite/local-filesystem. A new `mlflow` database in the same Postgres
+  instance and a new `datoscope-mlflow` bucket in the same MinIO, both auto-created idempotently
+  by `docker/mlflow_entrypoint.py` on container start (Postgres doesn't support `CREATE DATABASE
+  IF NOT EXISTS`, so this does an explicit `pg_database` existence check first; MinIO doesn't
+  auto-create buckets at all, so same idea via `head_bucket`/`create_bucket`).
+- **DVC scoped to model artifacts only, not processed datasets** — user's explicit choice. DVC's
+  usual job (versioning flat files in git) doesn't map cleanly onto this project's data, which
+  lives in the Postgres warehouse (section 1), not flat files. Model artifacts are the one thing
+  in the whole system that's still naturally file-shaped (a `.pkl`), so that's what DVC tracks.
+- **Model export is a deliberate script + manual `dvc add`/`git commit`/`dvc push` sequence, not
+  something the API does automatically on promotion** — a running web service mutating git history
+  and pushing to a remote as a side effect of an HTTP request crosses a boundary that should stay
+  a reviewable, human-triggered step (same reasoning as CD being deferred rather than automated
+  prematurely). `scripts/05_export_production_model.py` only writes the file; README documents the
+  rest of the sequence explicitly.
+- **MLflow logging is best-effort everywhere it's wired in** (training endpoints, comparison's
+  registration step) — model training or comparison already succeeded by the time MLflow is
+  involved, so an unreachable MLflow server degrades to `mlflow_run_id: null` / `mlflow_error:
+  "..."` in the response rather than failing the whole request. Mirrors the resilience posture
+  already used for other non-critical-path failures in the API.
+- **`pickle` serialization for MLflow model artifacts, not MLflow's `skops` default** — found
+  during verification, not designed in upfront (see Mistakes below); matches what
+  `utils.modeling.export_model_bytes` (the app's own model-download feature) already uses, so
+  there's one serialization convention across the whole project instead of two.
+- **`--allowed-hosts` explicitly set on the MLflow server** — found during verification (see
+  Mistakes below); without it, MLflow 3.x's DNS-rebinding protection rejects every request whose
+  Host header isn't `localhost`/a private IP, which silently includes the `api` container calling
+  `http://mlflow:5000` from inside docker-compose.
+
+**Mistakes & fixes**
+1. **MLflow 3.x's new security middleware blocked cross-container requests.** First boot of the
+   `mlflow` service looked healthy (`curl http://localhost:5001/` → 200), but a request with
+   `Host: mlflow:5000` (simulating how the `api` container would actually reach it) got `403
+   Invalid Host header - possible DNS rebinding attack detected`. MLflow 3.x added Host-header
+   validation defaulting to localhost + private IPs only — a docker-compose service hostname isn't
+   in that list. Fixed with `--allowed-hosts mlflow:5000,localhost:5000,localhost:5001,...`
+   (exact `host:port` strings, not just hostnames — a first attempt with bare `mlflow,localhost`
+   still failed the same way, since the default-replacement list does exact matching including
+   port). Caught by deliberately testing with a spoofed Host header before building anything on
+   top of the service, not by assuming a 200 on localhost meant it was actually reachable from
+   where it needed to be reached from.
+2. **MLflow's S3 artifact upload happens client-side, not proxied through the tracking server** —
+   the first attempt at `mlflow.sklearn.log_model(...)` from a plain Python shell (with
+   `MLFLOW_TRACKING_URI` set but no AWS/MinIO credentials in the environment) failed with
+   `NoCredentialsError`. Params and metrics had already logged fine (visible in the MLflow UI),
+   which is what made it clear only the artifact-upload path needed credentials — MLflow's S3
+   artifact store is written to directly by whichever process calls `log_model`, not routed
+   through the server. Fixed by setting `MLFLOW_S3_ENDPOINT_URL`/`AWS_ACCESS_KEY_ID`/
+   `AWS_SECRET_ACCESS_KEY` (same MinIO credentials the ETL pipeline already uses) wherever
+   `api/tracking.py` runs.
+3. **KNN models failed to log with a real, non-obvious error**: `mlflow.sklearn.log_model` (skops
+   serialization, MLflow's new default) rejected `KNeighborsClassifier` specifically —
+   `Untrusted types found: ['sklearn.metrics._dist_metrics.EuclideanDistance64',
+   'sklearn.neighbors._kd_tree.KDTree']`. Logistic Regression and Random Forest logged fine in the
+   same request, which pinned this to skops' per-type trust allowlist rather than anything wrong
+   with the training result itself (the best-effort error handling from decision #4 above caught
+   it cleanly — training still succeeded, only that one model's `mlflow_run_id` came back `null`).
+   Two fixes were possible: allowlist the specific internal types via `skops_trusted_types`, or
+   switch to `pickle` serialization. Chose `pickle` — allowlisting is fragile whack-a-mole (every
+   new sklearn estimator type used across regression/classification/clustering could hit the same
+   wall) versus one serialization format that handles all of them uniformly, and it's what the
+   rest of the app already uses for model export.
+4. **`POST /models/{name}/promote` returned 500 instead of 404 for a nonexistent registered
+   model.** `MlflowClient.get_latest_versions()` doesn't return an empty list for an unknown model
+   name the way the code assumed — it raises `mlflow.exceptions.RestException:
+   RESOURCE_DOES_NOT_EXIST`, uncaught, surfacing as a raw 500. Caught by deliberately testing the
+   error path (`curl .../nonexistent_model/promote`) rather than only testing the happy path that
+   had already worked. Fixed by catching `MlflowException` and re-raising as the router's own
+   `ModelPromotionError` → 404.
+5. **`ruff check .` with no config flagged 145 issues** using its full default-ish rule surface
+   (bugbear, pep8-naming, bandit, datetimez, perflint, pylint, simplify, pyupgrade) — none of
+   which is what "CI job = lint" was asking for on a codebase that predates this session. Scoped
+   `pyproject.toml`'s `[tool.ruff.lint]` to `select = ["E", "F"]` (pycodestyle errors + pyflakes:
+   real bugs, unused imports, undefined names) instead of gating CI on a large, unrelated style
+   pass. Of the remaining 39 findings under that narrower selection: 32 were `utils/__init__.py`
+   re-exporting submodule symbols for `from utils import X` (a legitimate, common pattern —
+   per-file-ignored for `F401`), one was `df.dtypes == object` (idiomatic pandas, not a real
+   type-comparison bug — ignored `E721` project-wide with a comment explaining why), and the
+   remaining 6 (two genuinely unused imports in `data_loader.py`, two in test files) were real
+   dead code, removed.
+
+**Verification performed** (real docker-compose services, not just written and assumed correct):
+- `docker compose up -d --build minio warehouse mlflow` — confirmed the `mlflow` service's
+  entrypoint correctly creates its Postgres database and MinIO bucket on first boot (both
+  previously absent) and that the tracking server responds on both `localhost:5001` (host) and a
+  spoofed `mlflow:5000` Host header (simulating the `api` container).
+- Full round trip for all three task types against the live API + MLflow: trained
+  regression/classification/clustering models via the real endpoints, confirmed every model
+  (including KNN, post-fix) got a real `mlflow_run_id`; ran `/comparison/*` and confirmed the
+  actual winner (by the same logic tested in section 2) was registered under
+  `<dataset_name>__<task>` and moved to Staging; called `/models/{name}/promote` and confirmed
+  Staging → Production; listed versions and confirmed the stage transition stuck.
+- DVC: `dvc add` a real exported Production model → `dvc push` → confirmed the object landed in
+  MinIO directly via `boto3.list_objects_v2` (not just trusting DVC's own "1 file pushed" message)
+  → deleted the local file → `dvc pull` → confirmed it came back byte-identical and still
+  loadable/predictable as a real fitted model. Test artifact (`mlflow_test_cls`) cleaned up from
+  both the local `models/` dir and the MinIO remote afterward so it doesn't ship in git history —
+  same hygiene as section 3's `pytest_*` warehouse cleanup.
+- `ruff check .` — clean pass after the config scoping + real dead-code removal above.
+- Full `pytest` suite (98 unit tests) re-run after the ruff-driven import removals — still 98/98,
+  confirming the "unused" imports really were unused and nothing broke.

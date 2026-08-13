@@ -1,0 +1,6 @@
+[core]
+    analytics = false
+    remote = minio_models
+['remote "minio_models"']
+    url = s3://datoscope-models/dvc-store
+    endpointurl = http://localhost:9000

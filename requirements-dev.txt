@@ -1,4 +1,6 @@
-# Test-only dependencies — not needed to run the app itself.
+# Test and dev-tooling dependencies — not needed to run the app itself.
 pytest>=8.0.0
 pytest-cov>=5.0.0
 moto[s3]>=5.0.0
+ruff>=0.5.0
+dvc[s3]>=3.50.0

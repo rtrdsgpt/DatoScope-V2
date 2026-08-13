@@ -98,19 +98,26 @@ DatoScope/
 │   ├── main.py
 │   ├── schemas.py
 │   ├── serialization.py
+│   ├── tracking.py
 │   └── routers/
 │       ├── datasets.py
 │       ├── eda.py
 │       ├── modeling.py
 │       ├── clustering.py
-│       └── comparison.py
+│       ├── comparison.py
+│       └── models.py
 ├── airflow/
 │   └── dags/
 │       └── datoscope_etl_dag.py
+├── models/                    # DVC-tracked Production model exports (empty until you export one)
+├── .github/workflows/ci.yml
 ├── docker-compose.yml
+├── Dockerfile               # api + streamlit (shared)
 ├── Dockerfile.airflow
+├── Dockerfile.mlflow
 ├── train.py
 ├── requirements.txt
+├── requirements-dev.txt
 └── requirements-etl.txt
 ```
 
@@ -207,8 +214,11 @@ colliding. From there:
   `GET /modeling/download/{model_id}` returns the fitted model as a `.pkl`
 - `POST /clustering/{name}` — train/evaluate KMeans/DBSCAN/Hierarchical + a 2D projection for
   plotting + the scaled feature matrix (used client-side for the dendrogram/elbow diagnostics)
-- `POST /comparison/regression|classification|clustering` — stateless winner-selection over a set
-  of already-computed model metrics (shared with the API via `utils/comparison.py`)
+- `POST /comparison/regression|classification|clustering` — winner-selection over a set of
+  already-computed model metrics (shared with the API via `utils/comparison.py`); also registers
+  the winner into the MLflow Model Registry (see MLOps below)
+- `GET /models/{name}/versions`, `POST /models/{name}/promote` — MLflow Model Registry (Staging →
+  Production)
 
 ## Testing
 
@@ -227,6 +237,71 @@ mocked with `moto`, and Great Expectations runs in an ephemeral in-process conte
 `tests/test_etl_validate.py` is the data-quality test layer specifically — it feeds known-bad
 fixtures (missing required columns, excess nulls, out-of-range values, empty tables) through
 `etl/validate.py` and asserts they're rejected, not just that clean data passes.
+
+## MLOps
+
+### Full dev stack
+
+`docker compose up -d` now brings up everything — MinIO, the warehouse, MLflow, Airflow, the
+FastAPI backend, and Streamlit — as one command:
+
+```bash
+docker compose up -d --build
+# Streamlit:  http://localhost:8501
+# API docs:   http://localhost:8000/docs
+# MLflow UI:  http://localhost:5001
+# Airflow UI: http://localhost:8080
+# MinIO console: http://localhost:9001
+```
+
+`api` and `streamlit` share one `Dockerfile` (different `command:` per service in
+`docker-compose.yml`). Running the API/Streamlit directly on the host (as in the sections above)
+still works too — nothing requires the containers.
+
+### MLflow — experiment tracking + Model Registry
+
+Every model trained via `POST /modeling/{name}/regression|classification` or
+`POST /clustering/{name}` is logged as its own MLflow run (params, metrics, and the model
+artifact) — "log every model-comparison run" from `todo.md` section 4. The backend store is a
+`mlflow` database in the same warehouse Postgres; the artifact store is a `datoscope-mlflow`
+bucket in the same MinIO — no separate infrastructure, both auto-created on first start by
+`docker/mlflow_entrypoint.py`.
+
+When `POST /comparison/regression|classification|clustering` is called with a `dataset_name`, the
+winning model (matched via the `mlflow_run_id` the modeling/clustering endpoint attached to it) is
+registered into the Model Registry as `<dataset_name>__<task>` and moved to **Staging**
+automatically — the comparison that names a winner *is* the promotion trigger. Moving a model from
+Staging to **Production** is a separate, deliberate call:
+
+```bash
+curl -X POST http://localhost:8000/models/<dataset_name>__<task>/promote
+curl http://localhost:8000/models/<dataset_name>__<task>/versions
+```
+
+### DVC — Production model artifacts
+
+DVC tracks model *artifacts* specifically (not the processed datasets, which live in the
+warehouse, not flat files — see `etl/load.py`), with MinIO as the S3 remote
+(`datoscope-models` bucket, configured in `.dvc/config`). Exporting a model is a deliberate,
+reviewable step, not something the API does automatically:
+
+```bash
+python scripts/05_export_production_model.py <dataset_name>__<task>   # pulls the Production version from MLflow
+dvc add models/<dataset_name>__<task>.pkl
+git add models/<dataset_name>__<task>.pkl.dvc models/.gitignore
+git commit -m "Track <dataset_name>__<task> Production model"
+dvc push
+```
+
+`dvc pull` restores tracked model files from MinIO on a fresh checkout.
+
+### CI
+
+`.github/workflows/ci.yml` runs on every push/PR to `main`: `ruff check .` (lint), then `pytest`.
+No services are started in CI, so the integration tests self-skip (see Testing above) — CI covers
+the full pure-function suite; run `pytest -m integration` locally against
+`docker compose up -d minio warehouse` for the rest. CD (build → push to ECR → deploy to
+Kubernetes) is deferred to sections 5–6, which provision the registry and cluster it would target.
 
 ## Supported File Types
 

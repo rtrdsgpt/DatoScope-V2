@@ -3,3 +3,20 @@ testpaths = ["tests"]
 markers = [
     "integration: requires live MinIO/Postgres (docker compose up -d minio warehouse)",
 ]
+
+[tool.ruff]
+line-length = 140
+exclude = ["scripts", ".venv"]
+
+[tool.ruff.lint]
+# Pyflakes + pycodestyle errors only — catches real bugs (unused imports,
+# undefined names, syntax issues) without gating CI on style opinions
+# (import sorting, docstrings, etc.) across a codebase that predates this.
+select = ["E", "F"]
+ignore = [
+    "E501",  # line length handled by the line-length setting above, not as a hard error
+    "E721",  # `df.dtypes == object` is the standard pandas idiom, not a type-comparison bug
+]
+
+[tool.ruff.lint.per-file-ignores]
+"**/__init__.py" = ["F401"]  # deliberate re-exports (`from utils import X`)

@@ -7,6 +7,7 @@ from fastapi.responses import Response
 
 from api.schemas import ClassificationRequest, RegressionRequest
 from api.serialization import MODEL_REGISTRY, serialize_classification_results, serialize_regression_results
+from api.tracking import log_model_run
 from etl.load import DatasetNotFoundError, get_dataset
 from utils.modeling import export_model_bytes, run_classification_models, run_regression_models
 
@@ -18,6 +19,25 @@ def _get_df(dataset_name: str, run_id: str | None):
         return get_dataset(dataset_name, run_id)
     except DatasetNotFoundError as exc:
         raise HTTPException(status_code=404, detail=str(exc)) from exc
+
+
+def _log_to_mlflow(results: dict, serialized: dict, *, dataset_name: str, task: str, params: dict, metric_keys: list[str]) -> None:
+    """Best-effort: model training already succeeded, so an unreachable MLflow
+    server shouldn't fail the request — just leaves mlflow_run_id null."""
+    for name, row in results.items():
+        try:
+            run_id = log_model_run(
+                dataset_name=dataset_name,
+                task=task,
+                model_name=name,
+                model=row["model"],
+                params=params,
+                metrics={k: serialized[name][k] for k in metric_keys},
+            )
+            serialized[name]["mlflow_run_id"] = run_id
+        except Exception as exc:
+            serialized[name]["mlflow_run_id"] = None
+            serialized[name]["mlflow_error"] = str(exc)
 
 
 @router.post("/{dataset_name}/regression")
@@ -48,7 +68,25 @@ def regression(dataset_name: str, req: RegressionRequest) -> dict:
     )
     if not results:
         raise HTTPException(status_code=422, detail="No models selected (set at least one of run_lr/run_ridge/run_lasso)")
-    return serialize_regression_results(results, dataset_name=dataset_name, target_col=req.target_col)
+
+    serialized = serialize_regression_results(results, dataset_name=dataset_name, target_col=req.target_col)
+    _log_to_mlflow(
+        results,
+        serialized,
+        dataset_name=dataset_name,
+        task="regression",
+        params={
+            "test_size": req.test_size,
+            "cv_folds": req.cv_folds,
+            "random_seed": req.random_seed,
+            "ridge_alpha": req.ridge_alpha,
+            "lasso_alpha": req.lasso_alpha,
+            "features": ",".join(req.features),
+            "target_col": req.target_col,
+        },
+        metric_keys=["R2", "MSE", "RMSE", "MAE", "CV_R2", "Overfit_Gap"],
+    )
+    return serialized
 
 
 @router.post("/{dataset_name}/classification")
@@ -84,7 +122,26 @@ def classification(dataset_name: str, req: ClassificationRequest) -> dict:
     )
     if not results:
         raise HTTPException(status_code=422, detail="No models selected (set at least one of run_logreg/run_rf/run_knn)")
-    return serialize_classification_results(results, dataset_name=dataset_name, target_col=req.target_col)
+
+    serialized = serialize_classification_results(results, dataset_name=dataset_name, target_col=req.target_col)
+    _log_to_mlflow(
+        results,
+        serialized,
+        dataset_name=dataset_name,
+        task="classification",
+        params={
+            "test_size": req.test_size,
+            "cv_folds": req.cv_folds,
+            "random_seed": req.random_seed,
+            "rf_estimators": req.rf_estimators,
+            "rf_max_depth": req.rf_max_depth,
+            "knn_neighbors": req.knn_neighbors,
+            "features": ",".join(req.features),
+            "target_col": req.target_col,
+        },
+        metric_keys=["Accuracy", "Precision", "Recall", "F1", "Macro_F1", "CV_Accuracy"],
+    )
+    return serialized
 
 
 @router.get("/download/{model_id}")

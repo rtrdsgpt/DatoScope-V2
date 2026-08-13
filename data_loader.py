@@ -17,10 +17,9 @@ from __future__ import annotations
 import os
 import zipfile
 import io
-import functools
 import logging
 from pathlib import Path
-from typing import Optional, Iterator
+from typing import Iterator
 
 import pandas as pd
 import numpy as np
