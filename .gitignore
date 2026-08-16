@@ -10,3 +10,11 @@ __pycache__/
 airflow/logs/
 .coverage
 .pytest_cache/
+
+# Terraform
+**/.terraform/
+terraform/**/*.tfstate
+terraform/**/*.tfstate.*
+terraform/**/.terraform.lock.hcl
+terraform/**/terraform.tfvars
+terraform/**/*.tfplan

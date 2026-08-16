@@ -396,8 +396,38 @@ dvc push
 `.github/workflows/ci.yml` runs on every push/PR to `main`: `ruff check .` (lint), then `pytest`.
 No services are started in CI, so the integration tests self-skip (see Testing above) — CI covers
 the full pure-function suite; run `pytest -m integration` locally against
-`docker compose up -d minio warehouse` for the rest. CD (build → push to ECR → deploy to
-Kubernetes) is deferred to sections 5–6, which provision the registry and cluster it would target.
+`docker compose up -d minio warehouse` for the rest.
+
+## AWS / Terraform
+
+Infrastructure as code for the AWS deployment target — `terraform/`, four modules
+(`modules/{s3,rds,ecr,iam}`) wired together in the root config:
+
+- **S3** — `raw`/`processed`/`models`/`mlflow` buckets (versioned, encrypted, public-access
+  blocked), naming mirrors the local MinIO buckets
+- **RDS** — a single Postgres warehouse instance, `db.t4g.micro`/20GB (free-tier-eligible)
+- **ECR** — one repo per image (`api`/`streamlit`/`airflow`), with a lifecycle policy that expires
+  untagged images after 1 day and keeps the last 10 tagged
+- **IAM** — separate least-privilege ETL and API roles, scoped to only the S3 buckets/actions each
+  needs. EKS-IRSA-ready: pass `eks_oidc_provider_arn`/`eks_oidc_provider_url` once section 6's
+  cluster exists and the roles become assumable by specific K8s service accounts; until then they
+  fall back to an account-root trust placeholder (a role can't exist with no principal at all)
+
+```bash
+cd terraform
+terraform init
+terraform validate
+# real apply needs AWS credentials + terraform.tfvars (see terraform.tfvars.example) — not run
+# here, no AWS credentials exist in this environment
+```
+
+No real AWS credentials exist in this project's environment, so nothing here has been `apply`'d
+against real AWS. Instead, `terraform/envs/localstack/` is a separate root module pointed at a
+local [LocalStack](https://localstack.cloud) container that lets `terraform apply`/`destroy` run
+for real — see its README for the walkthrough. Verified: 21 resources created (S3 buckets + IAM
+roles/policies), independently confirmed via the AWS CLI against LocalStack, then destroyed
+cleanly. (`ecr` is a LocalStack Pro-only feature and `rds` is flaky there, so those two are
+`validate`-only.)
 
 ## Supported File Types
 

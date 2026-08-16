@@ -762,3 +762,81 @@ docker-compose. Langfuse/OTel (the LLM-tracing half of section 8) remain open, t
   the Prometheus datasource provisioned and marked default; `GET /api/search` shows the
   `DatoScope API` dashboard loaded under the `DatoScope` folder — confirming the provisioning files
   were actually read and applied, not just present on disk unused.
+
+---
+
+## Section 5 — AWS / Terraform
+
+**Progress:** Terraform modules for S3, RDS, ECR, and IAM, wired together in a root config, plus a
+separate LocalStack-backed environment used to `apply` (not just `validate`) the S3/IAM modules
+for real.
+
+**Decisions**
+- **Four modules, one root config**: `terraform/modules/{s3,rds,ecr,iam}` each own one AWS service,
+  `terraform/main.tf` instantiates and wires them (e.g. IAM's policies reference S3's bucket ARNs
+  via `module.s3.bucket_arns`). Standard Terraform module boundary — each one is independently
+  testable/replaceable.
+- **S3 bucket names get a random suffix** (`random_id.suffix`, 4 bytes): S3 bucket names are
+  globally unique across *all* AWS accounts, not just this one, so `datoscope-dev-raw` would
+  collide with anyone else who's ever created that name. The random suffix avoids needing the user
+  to hand-pick a unique prefix.
+- **RDS defaults to the account's default VPC** (`data.aws_vpc.default` / `data.aws_subnets.default`
+  when `vpc_id`/`subnet_ids` aren't passed): this is a free-tier dev setup, not a production network
+  topology with custom VPC/subnet design — todo.md section 5 scopes this as "keep the live AWS
+  footprint minimal", so a bespoke VPC module would be scope creep for what this needs to prove.
+- **IAM roles are EKS-IRSA-ready but not yet IRSA-bound**: section 6 (Kubernetes/EKS) doesn't exist
+  yet, so there's no OIDC provider to trust. `eks_oidc_provider_arn`/`_url` default to `null`, and
+  the roles fall back to an account-root `sts:AssumeRole` trust policy as a placeholder (IAM roles
+  can't exist with no principal at all). Once section 6 provisions a real EKS cluster, its OIDC
+  provider ARN/URL get passed in and the roles become properly IRSA-scoped to specific K8s service
+  accounts — no restructuring needed, just filling in two variables that were designed for this.
+  Recorded as `irsa_enabled` output so it's visible which mode is active.
+- **ECR gets a lifecycle policy from the start** (expire untagged after 1 day, keep last 10 tagged):
+  the CD pipeline (todo.md section 4's deferred CD job, being unblocked now) will push an image on
+  every merge to main, and unbounded image retention is a real cost/clutter problem, not a
+  hypothetical one — cheap to set up now vs. bolting on later.
+- **Chose LocalStack over "validate only" for a stronger check**: `terraform validate` only checks
+  HCL syntax and type-correctness — it doesn't catch e.g. a broken cross-resource reference that's
+  syntactically valid but wrong, or a provider-rejected argument combination. LocalStack runs a real
+  `apply`/`destroy` cycle with real state and real (emulated) AWS API calls, without needing actual
+  AWS credentials or spending money — a genuinely stronger verification for a session built around
+  "verify against real running services," not just a nice-to-have.
+- **Separate root module for LocalStack** (`terraform/envs/localstack/`), not a flag on the main
+  provider config: keeps the LocalStack endpoint overrides completely isolated from the config that
+  will eventually point at real AWS — no risk of a stray env var accidentally routing a real `apply`
+  at LocalStack or vice versa. It re-uses the same `modules/s3` and `modules/iam` source, so what
+  gets tested is the actual module code, not a parallel copy of it.
+
+**Mistakes & Fixes**
+- `brew install terraform helm kind git-lfs` failed with "No available formula with the name
+  'terraform'" — HashiCorp pulled Terraform from homebrew-core after their license change (BSL) and
+  moved it to their own tap. Fixed with `brew tap hashicorp/tap` then
+  `brew install hashicorp/tap/terraform helm kind git-lfs`.
+- First LocalStack attempt used the `latest` tag and failed immediately: "License activation
+  failed! ... No credentials were found" — `latest` now resolves to an image that expects a Pro auth
+  token even for community-only usage. Fixed by pinning to `localstack/localstack:3.8.1`, a known
+  community-edition release, which started clean with no token needed.
+- Planned to `apply` all four modules (s3/rds/ecr/iam) against LocalStack, but `ecr` failed with
+  `API for service 'ecr' not yet implemented or pro feature` — checked LocalStack's own coverage
+  docs reference in the error message rather than assuming; ECR emulation is Pro-only in LocalStack
+  community edition. Dropped `ecr` from the LocalStack env (and `rds`, which has known-flaky
+  community support) rather than working around it, and documented why in
+  `terraform/envs/localstack/README.md` so it's not mistaken for an oversight later.
+- `.gitignore`'s original Terraform patterns (`terraform/.terraform/`, `terraform/*.tfstate`, etc.)
+  only matched the root `terraform/` directory, not the nested `terraform/envs/localstack/` one —
+  caught by `git status` showing `.terraform/`/`terraform.tfstate` under the nested path as
+  untracked before staging. Fixed by switching to `**/`-prefixed globs
+  (`terraform/**/*.tfstate`, `**/.terraform/`, etc.) that match at any depth.
+
+**Verification**
+- `terraform fmt -recursive` + `terraform validate` pass clean on the main root config (all four
+  modules).
+- Real `terraform apply -auto-approve` against a live LocalStack container (`s3` + `iam` modules,
+  21 resources) succeeded; verified the actual resources exist independently via the AWS CLI
+  (`aws --endpoint-url=http://localhost:4566 s3 ls` shows all 4 buckets, `iam list-roles` shows
+  both roles, `iam list-role-policies` shows the attached S3 policy, `s3api get-bucket-versioning`
+  confirms versioning is actually `Enabled` — not just that Terraform's state file says so) —
+  then `terraform destroy -auto-approve` cleanly removed all 21 resources, and the LocalStack
+  container was stopped/removed afterward (no lingering test infra).
+- No real AWS `apply` attempted — no AWS credentials exist in this environment or `.env`, and doing
+  so would need explicit user authorization for real cloud spend, which wasn't given.

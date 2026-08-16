@@ -1,0 +1,14 @@
+# Copy to terraform.tfvars (gitignored) and fill in real values before
+# running plan/apply. Never commit terraform.tfvars.
+
+aws_region   = "us-east-1"
+environment  = "dev"
+project_name = "datoscope"
+
+warehouse_db_name     = "datoscope"
+warehouse_db_username = "datoscope"
+warehouse_db_password = "changeme-use-a-real-secret"
+
+# Leave these null until section 6's EKS cluster exists — see variables.tf
+# eks_oidc_provider_arn = "arn:aws:iam::123456789012:oidc-provider/oidc.eks.us-east-1.amazonaws.com/id/EXAMPLE"
+# eks_oidc_provider_url = "oidc.eks.us-east-1.amazonaws.com/id/EXAMPLE"

@@ -115,18 +115,33 @@ supersedes its scope with the additions below.
       or infrastructure decisions made out of order. Revisit once sections 5–6 are done.
 
 ## 5. AWS
-- [ ] **S3**: raw and processed data-lake zones (feeding the ETL pipeline above), plus the DVC
-      remote for datasets/models
-- [ ] **RDS (Postgres)**: the warehouse table the FastAPI backend reads from in the deployed
-      environment (docker-compose Postgres for local dev, as above)
-- [ ] **ECR**: container registry for the FastAPI/Streamlit/Airflow images
-- [ ] **IAM**: least-privilege roles for the ETL job and the API service (S3 read/write scoped to
-      the specific buckets/prefixes they need, not a broad admin role)
-- [ ] **Terraform** for the above (S3 buckets, ECR repo, RDS instance, IAM roles) — infrastructure
-      as code is itself a distinct, valued skill here, separate from just "using AWS services"
-- [ ] Cost note: keep the live AWS footprint minimal — free-tier RDS, S3 (near-zero at this scale),
+- [x] **S3**: raw/processed/models/mlflow buckets (feeding the ETL pipeline above, plus the DVC
+      remote for datasets/models) — `terraform/modules/s3` (versioning + SSE + public-access-block
+      on all four, globally-unique names via a random suffix)
+- [x] **RDS (Postgres)**: the warehouse table the FastAPI backend reads from in the deployed
+      environment (docker-compose Postgres for local dev, as above) — `terraform/modules/rds`
+      (db.t4g.micro / 20GB, free-tier-eligible, defaults to the account's default VPC)
+- [x] **ECR**: container registry for the FastAPI/Streamlit/Airflow images — `terraform/modules/ecr`
+      (image scanning on push, lifecycle policy expiring untagged images after 1 day / keeping the
+      last 10 tagged)
+- [x] **IAM**: least-privilege roles for the ETL job and the API service (S3 read/write scoped to
+      the specific buckets/prefixes they need, not a broad admin role) — `terraform/modules/iam`
+      (separate ETL/API roles, EKS-IRSA-ready via optional OIDC variables that default to a
+      placeholder account-root trust until section 6's cluster exists)
+- [x] **Terraform** for the above (S3 buckets, ECR repo, RDS instance, IAM roles) — infrastructure
+      as code is itself a distinct, valued skill here, separate from just "using AWS services".
+      Root config wires all four modules together (`terraform/main.tf`); `terraform validate`
+      passes end-to-end. Went a step further than validate-only: `terraform/envs/localstack/` is a
+      separate root module pointed at a local LocalStack container instead of real AWS — ran a real
+      `terraform apply` for the `s3`+`iam` modules (21 resources), verified the actual buckets/
+      roles/policies exist via the AWS CLI against LocalStack, then `terraform destroy`. `ecr` is
+      Pro-only in LocalStack community edition (confirmed via a direct API call) and `rds` was
+      skipped as flaky there, so both are validate-only — no real AWS credentials exist in this
+      environment/`.env`, so an actual `terraform apply` against real AWS was not attempted.
+- [x] Cost note: keep the live AWS footprint minimal — free-tier RDS, S3 (near-zero at this scale),
       spin up EKS only when demoing/screenshotting rather than leaving a cluster running; local
-      dev/demo runs on `kind`/`minikube` against the same manifests (see below)
+      dev/demo runs on `kind`/`minikube` against the same manifests (see below). Codified as
+      defaults in `terraform/variables.tf` (`db.t4g.micro`, 20GB storage) rather than just a note.
 
 ## 6. Kubernetes
 - [ ] Deployment/Service/Ingress manifests (or a Helm chart) for the FastAPI backend and Streamlit
