@@ -166,6 +166,15 @@ OpenAI/Anthropic — see log.md for why.
       generations, scores) — this is the right tool for that half of the system, not generic spans
 - [ ] Structured logs / OpenTelemetry for the non-LLM pipeline stages (ETL tasks, model training) —
       Langfuse and OTel covering their respective halves, not one tool stretched over both
+- [x] **Prometheus + Grafana** for the metrics/dashboards half (request rate, p95 latency, error
+      rate, status-code breakdown for the FastAPI backend) — `prometheus-fastapi-instrumentator`
+      exposes `/metrics` on the API (`api/main.py`), scraped by the new `prometheus` docker-compose
+      service (`observability/prometheus/prometheus.yml`), visualized by the new `grafana` service
+      via file-based provisioning (`observability/grafana/provisioning/`, one dashboard —
+      `datoscope-api.json` — 4 panels). Verified end-to-end against live containers: Prometheus
+      target `up=1` for `job="datoscope-api"`, real `http_requests_total` series returned from a
+      live query, Grafana's `/api/datasources` and `/api/search` confirm the Prometheus datasource
+      and dashboard are both provisioned and loaded, not just files sitting unread in a mount.
 
 ## Why this version, not the original AutoML-only plan
 Adding a real ETL pipeline + AWS + Kubernetes turns this from "a student Streamlit app with

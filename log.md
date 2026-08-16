@@ -711,3 +711,54 @@ and assumed correct):
   This is a normal, safe, additive commit — confirmed via `git lfs ls-files` and a diff showing the
   committed blob shrink from 3,127,231 bytes to a 132-byte pointer. The pre-LFS full-size blob
   still exists in older commits' history (mildly wasteful, but nothing was destroyed or force-pushed).
+
+---
+
+## Section 8 (partial) — Prometheus + Grafana
+
+**Progress:** Metrics/dashboards half of observability added — `prometheus-fastapi-instrumentator`
+on the API, a `prometheus` scrape target, and a provisioned `grafana` dashboard, all wired into
+docker-compose. Langfuse/OTel (the LLM-tracing half of section 8) remain open, tracked separately.
+
+**Decisions**
+- **Split section 8 in two, same reasoning as DVC/LFS**: Prometheus/Grafana covers request-level
+  metrics for the FastAPI backend; Langfuse (not yet done) is the right tool for LLM/agent traces
+  specifically. One tool per concern, not one stretched over both.
+- **File-based Grafana provisioning**, not clicking through the UI and exporting — datasource
+  (`observability/grafana/provisioning/datasources/datasource.yml`) and dashboard
+  (`observability/grafana/provisioning/dashboards/dashboard.yml` +
+  `observability/grafana/dashboards/datoscope-api.json`) are both version-controlled and rebuild
+  identically from a clean `docker compose up`.
+- **Dashboard has 4 panels**: request rate by endpoint, p95 latency by endpoint, error rate
+  (non-2xx) by endpoint, and requests by status code — all driven by the instrumentator's default
+  `http_requests_total` / `http_request_duration_seconds_bucket` metrics, no custom instrumentation
+  needed for this pass.
+
+**Mistakes & Fixes**
+- Planned a 5th panel, "in-progress requests", assuming `prometheus-fastapi-instrumentator` exposes
+  an in-progress gauge by default (it does for some other frameworks' equivalents). Checked the
+  actual installed version's `/metrics` output and `metrics` module exports via `inspect`/`dir()` —
+  no such metric exists here. Fixed by swapping that panel for "requests by status code" using the
+  confirmed-present `http_requests_total` status label instead of guessing from memory of the
+  library's docs.
+- **Found and fixed a pre-existing, unrelated bug while verifying**: the API container crash-looped
+  on startup with `ModuleNotFoundError: No module named 'agent'`. Root cause: `Dockerfile` was
+  never updated when the `agent/` package was added in section 7 — it copies `api/` and `etl/` but
+  not `agent/`, so `api/routers/agent.py`'s `from agent.pipeline_agent import run` failed at import
+  time in the container even though it worked fine outside Docker (repo root was on `sys.path`
+  locally). Fixed with one line, `COPY agent/ ./agent/`, added right after the existing `COPY api/`
+  line. This had nothing to do with Prometheus/Grafana directly, but the API container needed to
+  actually be up for Prometheus to have anything to scrape, so it surfaced here.
+
+**Verification**
+- Rebuilt and brought up `minio`/`warehouse`/`mlflow`/`api`/`prometheus`/`grafana` via
+  `docker compose up -d --build`; confirmed all containers reach `Up`/`healthy`, not just `Created`.
+- API: `curl localhost:8000/metrics` returns real `http_requests_total` counter lines.
+- Prometheus: `GET /api/v1/targets` shows `job="datoscope-api"` with `health: "up"`;
+  `GET /api/v1/query?query=up{job="datoscope-api"}` returns a live `1` sample;
+  `http_requests_total{job="datoscope-api"}` returns real series after generating traffic — not
+  just that the container is running, but that it's actually pulling real data from the API.
+- Grafana: `GET /api/health` reports `database: ok`; `GET /api/datasources` (authenticated) shows
+  the Prometheus datasource provisioned and marked default; `GET /api/search` shows the
+  `DatoScope API` dashboard loaded under the `DatoScope` folder — confirming the provisioning files
+  were actually read and applied, not just present on disk unused.

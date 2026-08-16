@@ -327,20 +327,32 @@ fixtures (missing required columns, excess nulls, out-of-range values, empty tab
 ### Full dev stack
 
 `docker compose up -d` now brings up everything — MinIO, the warehouse, MLflow, Airflow, the
-FastAPI backend, and Streamlit — as one command:
+FastAPI backend, Streamlit, and Prometheus/Grafana — as one command:
 
 ```bash
 docker compose up -d --build
-# Streamlit:  http://localhost:8501
-# API docs:   http://localhost:8000/docs
-# MLflow UI:  http://localhost:5001
-# Airflow UI: http://localhost:8080
-# MinIO console: http://localhost:9001
+# Streamlit:      http://localhost:8501
+# API docs:       http://localhost:8000/docs
+# MLflow UI:      http://localhost:5001
+# Airflow UI:     http://localhost:8080
+# MinIO console:  http://localhost:9001
+# Prometheus:     http://localhost:9090
+# Grafana:        http://localhost:3000 (admin/admin)
 ```
 
 `api` and `streamlit` share one `Dockerfile` (different `command:` per service in
 `docker-compose.yml`). Running the API/Streamlit directly on the host (as in the sections above)
 still works too — nothing requires the containers.
+
+### Prometheus + Grafana — metrics
+
+The FastAPI backend is instrumented with `prometheus-fastapi-instrumentator`, exposing request
+rate/latency/status metrics at `GET /metrics`. The `prometheus` service scrapes it every 15s
+(`observability/prometheus/prometheus.yml`); the `grafana` service auto-provisions the Prometheus
+datasource and a **DatoScope API** dashboard (`observability/grafana/`) with request rate, p95
+latency, error rate, and status-code breakdown panels — no manual dashboard setup needed after
+`docker compose up`. This covers the metrics half of `todo.md` section 8; Langfuse (LLM/agent
+traces) is the other half, tracked separately.
 
 ### MLflow — experiment tracking + Model Registry
 

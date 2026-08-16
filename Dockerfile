@@ -14,6 +14,7 @@ COPY pages/ ./pages/
 COPY utils/ ./utils/
 COPY api/ ./api/
 COPY etl/ ./etl/
+COPY agent/ ./agent/
 
 # Overridden per-service in docker-compose.yml (uvicorn for the API, streamlit for the UI)
 CMD ["uvicorn", "api.main:app", "--host", "0.0.0.0", "--port", "8000"]

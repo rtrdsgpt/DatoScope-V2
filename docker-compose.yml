@@ -96,6 +96,38 @@ services:
     ports:
       - "8501:8501"
 
+  # --- Observability (section 8) — Prometheus scrapes the API's /metrics
+  # (request rate/latency/errors, prometheus-fastapi-instrumentator in
+  # api/main.py); Grafana visualizes it via a provisioned dashboard. This is
+  # the non-LLM metrics/dashboards half; Langfuse (separate) covers the
+  # LLM/agent traces, not stretched over both. ---
+
+  prometheus:
+    image: prom/prometheus:latest
+    volumes:
+      - ./observability/prometheus/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+      - prometheus_data:/prometheus
+    ports:
+      - "9090:9090"
+    depends_on:
+      - api
+
+  grafana:
+    image: grafana/grafana:latest
+    environment:
+      GF_SECURITY_ADMIN_USER: admin
+      GF_SECURITY_ADMIN_PASSWORD: admin
+      GF_AUTH_ANONYMOUS_ENABLED: "true"
+      GF_AUTH_ANONYMOUS_ORG_ROLE: Viewer
+    volumes:
+      - ./observability/grafana/provisioning:/etc/grafana/provisioning:ro
+      - ./observability/grafana/dashboards:/var/lib/grafana/dashboards:ro
+      - grafana_data:/var/lib/grafana
+    ports:
+      - "3000:3000"
+    depends_on:
+      - prometheus
+
   # --- Airflow (LocalExecutor + its own metadata Postgres, deliberately
   # bounded -- no Celery/Redis/worker fleet, this is one daily ETL DAG) ---
 
@@ -168,3 +200,5 @@ volumes:
   minio_data:
   warehouse_data:
   airflow_metadata:
+  prometheus_data:
+  grafana_data:
