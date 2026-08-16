@@ -135,6 +135,17 @@ DatoScope/
 
 ## Setup
 
+This repo uses [Git LFS](https://git-lfs.com) for large binary files (the course report PDF, and
+any `.parquet`/`.pt`/`.h5`/etc. that show up later — see `.gitattributes`; model artifacts go
+through DVC instead, not LFS — see MLOps below). Install it once per machine, then clone/pull
+normally:
+
+```bash
+brew install git-lfs   # or see git-lfs.com for other platforms
+git lfs install
+git clone https://github.com/rtrdsgpt/DatoScope-V2.git
+```
+
 Use Python 3.11 for the most reliable dependency compatibility.
 
 ```bash

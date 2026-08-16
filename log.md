@@ -690,3 +690,24 @@ and assumed correct):
   `agent/mcp_server.py` imports without error.
 - Warehouse cleanup: dropped all `*_test`/`agent_demo*` tables and their `etl_runs` rows after
   verification, same hygiene as sections 3–4.
+
+---
+
+## Infra housekeeping — Git LFS
+
+**Progress:** Git LFS set up for large binary files that aren't model artifacts.
+
+**Decisions**
+- **LFS covers what DVC doesn't**: DVC (section 4) already owns model artifacts specifically
+  (`models/*.pkl`, opt-in per-file via `dvc add`). LFS's `.gitattributes` patterns
+  (`*.pdf`/`*.pptx`/`*.parquet`/`*.h5`/`*.onnx`/`*.pt`/`*.ckpt`) deliberately exclude `.pkl` to
+  avoid two systems claiming the same file type — LFS handles other large binaries (starting with
+  the 3MB course report PDF), DVC handles trained models.
+- **Set up forward-only, not migrated retroactively**: `git lfs migrate import` would rewrite every
+  commit's hash from the one that first added the PDF onward (likely the repo's very first commit),
+  requiring a force-push to the remote to publish — a destructive operation on shared history that
+  wasn't asked for. Instead: added the LFS tracking pattern, then `git rm --cached` +
+  re-`git add` the already-committed PDF, which stages it fresh through the now-active LFS filter.
+  This is a normal, safe, additive commit — confirmed via `git lfs ls-files` and a diff showing the
+  committed blob shrink from 3,127,231 bytes to a 132-byte pointer. The pre-LFS full-size blob
+  still exists in older commits' history (mildly wasteful, but nothing was destroyed or force-pushed).

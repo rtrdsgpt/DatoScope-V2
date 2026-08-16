@@ -103,6 +103,10 @@ supersedes its scope with the additions below.
       and writes it in the same payload shape the API's model-download endpoint uses. `dvc add` /
       `dvc push` / `dvc pull` verified end-to-end against live MinIO (round-tripped a real
       Production model through delete-and-restore).
+- [x] **Git LFS** for large binary files that aren't model artifacts (those stay DVC's job) — the
+      course report PDF and any future `.parquet`/`.pt`/`.h5`/etc. (`.gitattributes`). Set up
+      forward-only (re-added the already-committed PDF under LFS as a new commit) rather than
+      rewriting git history to retroactively migrate it, which would need a force-push.
 - [x] **CI/CD** (GitHub Actions): CI job = lint + pytest on push; CD job = build the Docker image,
       push to **ECR**, then deploy to the Kubernetes cluster (see below) — one workflow, two jobs.
       CI done: `.github/workflows/ci.yml` (ruff + pytest, integration tests self-skip with no
