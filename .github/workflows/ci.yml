@@ -1,4 +1,4 @@
-name: CI
+name: CI/CD
 
 on:
   push:
@@ -30,3 +30,77 @@ jobs:
         # this runs the pure-function suite; integration tests run locally
         # via `docker compose up -d minio warehouse && pytest -m integration`.
         run: pytest
+
+  # Builds + pushes the two app images to ECR, then rolls them out to the EKS
+  # cluster provisioned by terraform/ (section 5) using the manifests/Helm
+  # values from k8s/ (section 6). Only runs on main, and only after lint-and-
+  # test passes. NOT verified end-to-end — there's no real EKS cluster this
+  # session has access to (see log.md section 6) — but reviewed for
+  # correctness against the actual terraform outputs and k8s/ layout rather
+  # than left as an unverified stub. Requires these repo secrets:
+  #   AWS_CD_ROLE_ARN  — IAM role this job assumes via OIDC (configure a
+  #                      GitHub OIDC trust policy on it; not the same as the
+  #                      terraform/modules/iam etl/api roles, which are for
+  #                      in-cluster pods, not CI)
+  #   AWS_REGION       — matches terraform's aws_region variable
+  #   EKS_CLUSTER_NAME — the EKS cluster name to deploy to
+  cd:
+    name: Build, push to ECR, deploy to EKS
+    needs: lint-and-test
+    if: github.ref == 'refs/heads/main' && github.event_name == 'push'
+    runs-on: ubuntu-latest
+    permissions:
+      id-token: write # required for aws-actions/configure-aws-credentials OIDC auth
+      contents: read
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ secrets.AWS_CD_ROLE_ARN }}
+          aws-region: ${{ secrets.AWS_REGION }}
+
+      - name: Login to ECR
+        id: ecr-login
+        uses: aws-actions/amazon-ecr-login@v2
+
+      - name: Set image env
+        run: |
+          echo "REGISTRY=${{ steps.ecr-login.outputs.registry }}" >> "$GITHUB_ENV"
+          echo "IMAGE_TAG=${{ github.sha }}" >> "$GITHUB_ENV"
+
+      - name: Build and push app image (api + streamlit)
+        run: |
+          docker build -f Dockerfile \
+            -t "$REGISTRY/datoscope-api:$IMAGE_TAG" -t "$REGISTRY/datoscope-api:latest" .
+          docker push "$REGISTRY/datoscope-api:$IMAGE_TAG"
+          docker push "$REGISTRY/datoscope-api:latest"
+
+      - name: Build and push Airflow image
+        run: |
+          docker build -f Dockerfile.airflow \
+            -t "$REGISTRY/datoscope-airflow:$IMAGE_TAG" -t "$REGISTRY/datoscope-airflow:latest" .
+          docker push "$REGISTRY/datoscope-airflow:$IMAGE_TAG"
+          docker push "$REGISTRY/datoscope-airflow:latest"
+
+      - name: Point kubectl at the EKS cluster
+        run: aws eks update-kubeconfig --name "${{ secrets.EKS_CLUSTER_NAME }}" --region "${{ secrets.AWS_REGION }}"
+
+      - name: Deploy API + Streamlit
+        run: |
+          kubectl -n datoscope set image deployment/datoscope-api api="$REGISTRY/datoscope-api:$IMAGE_TAG"
+          kubectl -n datoscope set image deployment/datoscope-streamlit streamlit="$REGISTRY/datoscope-api:$IMAGE_TAG"
+          kubectl -n datoscope rollout status deployment/datoscope-api
+          kubectl -n datoscope rollout status deployment/datoscope-streamlit
+
+      - name: Deploy Airflow
+        run: |
+          helm repo add apache-airflow https://airflow.apache.org
+          helm upgrade datoscope-airflow apache-airflow/airflow \
+            --version 1.15.0 \
+            --namespace airflow \
+            -f k8s/airflow/values-eks.yaml \
+            --set images.airflow.repository="$REGISTRY/datoscope-airflow" \
+            --set images.airflow.tag="$IMAGE_TAG" \
+            --wait --timeout 10m

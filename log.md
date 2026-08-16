@@ -927,3 +927,42 @@ the official Helm chart with `KubernetesExecutor`, both verified on a real local
 - EKS path: documented and reviewed against the real `terraform output` shapes from section 5, but
   not applied — no EKS cluster exists and provisioning one has a real hourly cost that wasn't
   authorized.
+
+---
+
+## Section 4 wrap-up — CD
+
+**Progress:** The CD job deferred at the end of section 4 (see that section's entry above) is now
+built — a second job in `.github/workflows/ci.yml`, now that sections 5/6 give it a real ECR
+registry and real K8s manifests/Helm chart to target.
+
+**Decisions**
+- **One workflow, two jobs**, not a separate `cd.yml`: matches what todo.md scoped from the start,
+  and keeps the CD job's `needs: lint-and-test` gate simple (same-workflow job dependencies, no
+  cross-workflow triggering).
+- **OIDC role assumption (`aws-actions/configure-aws-credentials` + `role-to-assume`), not static
+  AWS access keys as a secret**: long-lived AWS credentials sitting in GitHub Secrets are a
+  standing risk (leak once, valid forever until manually rotated); an OIDC trust policy scoped to
+  this repo means there's no long-lived secret to leak in the first place. This is also
+  AWS/GitHub's own current recommended pattern, not a nonstandard choice.
+- **`kubectl set image` for the app, `helm upgrade` for Airflow** — matches how each was actually
+  deployed in section 6 (raw manifests vs. chart), rather than switching both to Helm or both to
+  raw `kubectl apply` for uniformity's sake; each deploy step mirrors the tool that owns that
+  resource.
+- **Every name the job references is the real one**, cross-checked against sections 5/6 rather than
+  written from memory: ECR repo naming (`datoscope-api`, `datoscope-airflow`) matches
+  `terraform/modules/ecr`'s `repository_names` default; namespace/Deployment/container names
+  (`datoscope`/`datoscope-api`/`api`, `datoscope-streamlit`/`streamlit`) match `k8s/base/*.yaml`
+  exactly (verified against section 6's actual kind deployment, not just read off the YAML); the
+  Airflow Helm release name/chart version (`datoscope-airflow`, `1.15.0`) match what was verified
+  working in section 6, including the chart-version pin that section 6 discovered was necessary.
+
+**Verification**
+- Not run end-to-end — no EKS cluster or AWS credentials exist in this environment (same
+  constraint noted throughout sections 5/6), and creating either would need explicit authorization
+  for real cloud cost/access that wasn't given.
+- What *was* done: every AWS/K8s resource name/path the job references was cross-checked against
+  the real Terraform module outputs (section 5) and the real k8s manifests as actually deployed and
+  verified in section 6 (not just read from the YAML source) — the closest thing to verification
+  possible without a live target, and a meaningfully stronger check than writing the job from the
+  chart/module docs alone.

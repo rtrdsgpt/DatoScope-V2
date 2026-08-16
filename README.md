@@ -447,6 +447,16 @@ section above, but not applied against a real cluster — none exists, and provi
 real hourly cost that wasn't authorized. The CD job below deploys to it automatically once one
 does.
 
+## CD
+
+`.github/workflows/ci.yml`'s `cd` job builds the app + Airflow images, pushes both to ECR, then
+rolls them out to the EKS cluster — `kubectl set image` for the API/Streamlit Deployments, `helm
+upgrade` for Airflow — on every push to `main`, after the `lint-and-test` job passes. Needs three
+repo secrets (`AWS_CD_ROLE_ARN`, `AWS_REGION`, `EKS_CLUSTER_NAME`) documented inline in the
+workflow file. **Not verified end-to-end** — no EKS cluster/AWS credentials exist in this
+environment to run it against — but built against the real `terraform/` and `k8s/` layout above,
+not as a disconnected stub.
+
 ## Supported File Types
 
 | Extension | Notes |

@@ -109,10 +109,16 @@ supersedes its scope with the additions below.
       rewriting git history to retroactively migrate it, which would need a force-push.
 - [x] **CI/CD** (GitHub Actions): CI job = lint + pytest on push; CD job = build the Docker image,
       push to **ECR**, then deploy to the Kubernetes cluster (see below) — one workflow, two jobs.
-      CI done: `.github/workflows/ci.yml` (ruff + pytest, integration tests self-skip with no
-      services running). **CD deliberately deferred** — it needs the ECR repo and K8s cluster from
-      sections 5–6, which don't exist yet; building it now would mean either a non-functional stub
-      or infrastructure decisions made out of order. Revisit once sections 5–6 are done.
+      CI: `.github/workflows/ci.yml` (ruff + pytest, integration tests self-skip with no services
+      running). CD (unblocked now that sections 5/6 exist): a `cd` job in the same workflow file,
+      gated on `lint-and-test` passing and `push` to `main` — builds both images (app +
+      Airflow), pushes to the ECR repos from `terraform/modules/ecr`, then `kubectl set image`s the
+      API/Streamlit Deployments and `helm upgrade`s Airflow against the manifests/values from
+      `k8s/`. **Not verified end-to-end** — no EKS cluster or AWS credentials exist in this
+      environment to actually run it against — but every resource name/path it references (ECR
+      repo names, K8s namespace/Deployment/Service names, the Airflow release name and chart
+      version) is the real one from sections 5/6, not a placeholder guess. Required GitHub secrets
+      (`AWS_CD_ROLE_ARN`, `AWS_REGION`, `EKS_CLUSTER_NAME`) documented inline in the workflow.
 
 ## 5. AWS
 - [x] **S3**: raw/processed/models/mlflow buckets (feeding the ETL pipeline above, plus the DVC
