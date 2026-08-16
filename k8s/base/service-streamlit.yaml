@@ -1,0 +1,11 @@
+apiVersion: v1
+kind: Service
+metadata:
+  name: datoscope-streamlit
+  namespace: datoscope
+spec:
+  selector:
+    app: datoscope-streamlit
+  ports:
+    - port: 8501
+      targetPort: 8501

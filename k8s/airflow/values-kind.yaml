@@ -1,0 +1,80 @@
+# Helm values for the official apache-airflow/airflow chart, KubernetesExecutor,
+# sized for a local kind smoke test — not a production values file. See
+# k8s/README.md for the full walkthrough and what "verified" means here.
+executor: KubernetesExecutor
+
+images:
+  airflow:
+    repository: datoscope-airflow
+    tag: local
+    pullPolicy: IfNotPresent
+
+# DAGs are baked into the image at /opt/airflow/dags (Dockerfile.airflow),
+# same pattern as the section 1 DAG — no git-sync/persistence needed.
+dags:
+  gitSync:
+    enabled: false
+  persistence:
+    enabled: false
+
+# KubernetesExecutor launches one pod per task and needs no Celery worker
+# fleet/broker — disabled to keep the local smoke-test footprint small.
+redis:
+  enabled: false
+workers:
+  replicas: 0
+flower:
+  enabled: false
+statsd:
+  enabled: false
+triggerer:
+  enabled: false
+
+webserver:
+  replicas: 1
+  resources:
+    requests:
+      cpu: 100m
+      memory: 512Mi
+
+scheduler:
+  replicas: 1
+  resources:
+    requests:
+      cpu: 100m
+      memory: 512Mi
+
+config:
+  core:
+    load_examples: "False"
+  webserver:
+    expose_config: "True"
+
+# Plain postgres:16 (k8s/airflow/metadata-postgres.yaml), not the chart's
+# bundled Bitnami subchart — its pinned image tag was pulled from Docker Hub
+# (ImagePullBackOff), see log.md section 6. Not the RDS warehouse either
+# (that's the app's data DB, a separate concern from Airflow's own metadata
+# DB either way — see log.md section 1).
+postgresql:
+  enabled: false
+
+data:
+  metadataConnection:
+    user: airflow
+    pass: airflow
+    protocol: postgresql
+    host: airflow-metadata-postgres
+    port: 5432
+    db: airflow
+    sslmode: disable
+
+env:
+  # Needed for `from etl... import ...` in the DAG — the image COPYs etl/ to
+  # /opt/airflow/etl (Dockerfile.airflow), same as docker-compose.yml's
+  # airflow-* services, which set this for the same reason.
+  - name: PYTHONPATH
+    value: "/opt/airflow"
+  - name: S3_ENDPOINT_URL
+    value: "http://minio.datoscope.svc.cluster.local:9000"
+  - name: WAREHOUSE_DSN
+    value: "postgresql+psycopg2://datoscope:datoscope123@warehouse.datoscope.svc.cluster.local:5432/datoscope"

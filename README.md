@@ -429,6 +429,24 @@ roles/policies), independently confirmed via the AWS CLI against LocalStack, the
 cleanly. (`ecr` is a LocalStack Pro-only feature and `rds` is flaky there, so those two are
 `validate`-only.)
 
+## Kubernetes
+
+`k8s/` — Deployment/Service/Ingress manifests for the API + Streamlit app (`k8s/base/`), and
+Airflow itself deployed via the official Helm chart with the `KubernetesExecutor` (`k8s/airflow/`,
+reusing the section 1 DAG as-is, now baked into the Airflow image). Full walkthrough — both the
+local `kind` path and the real EKS path — is in [`k8s/README.md`](k8s/README.md).
+
+Verified end-to-end on a real local `kind` cluster: the app is reachable through a real
+ingress-nginx controller (`curl` through the mapped port, not just `kubectl get pods`), and
+triggering the Airflow DAG makes the `KubernetesExecutor` dynamically launch real per-task pods
+(confirmed via `kubectl get events`) — the specific mechanism this section is about. The DAG's
+tasks themselves aren't expected to succeed in this smoke test (no MinIO/warehouse deployed in the
+kind cluster — that's what sections 4/5 already cover); see `k8s/README.md` for the exact
+boundary. The EKS path is documented and reviewed against the real Terraform outputs from the AWS
+section above, but not applied against a real cluster — none exists, and provisioning one has a
+real hourly cost that wasn't authorized. The CD job below deploys to it automatically once one
+does.
+
 ## Supported File Types
 
 | Extension | Notes |

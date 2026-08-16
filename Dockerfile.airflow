@@ -12,3 +12,7 @@ RUN pip install --no-cache-dir -r requirements-etl.txt \
 COPY etl/ ./etl/
 COPY utils/ ./utils/
 COPY data_loader.py ./
+# Baked in for the Kubernetes deploy (section 6), which has no bind mount to
+# fall back on; docker-compose's ./airflow/dags bind mount still overlays
+# this at container start for local dev, so this doesn't change that path.
+COPY airflow/dags/ ./dags/

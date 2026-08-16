@@ -1,0 +1,12 @@
+# Non-secret config for the API/Streamlit deployments. Points at the
+# in-cluster/AWS service names for whichever environment this is applied to
+# — kind's dev values differ from the EKS+RDS+S3 target, see k8s/README.md.
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: datoscope-config
+  namespace: datoscope
+data:
+  S3_ENDPOINT_URL: "http://minio:9000"
+  MLFLOW_TRACKING_URI: "http://mlflow:5000"
+  API_BASE_URL: "http://datoscope-api:8000"

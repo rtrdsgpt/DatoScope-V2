@@ -840,3 +840,90 @@ for real.
   container was stopped/removed afterward (no lingering test infra).
 - No real AWS `apply` attempted — no AWS credentials exist in this environment or `.env`, and doing
   so would need explicit user authorization for real cloud spend, which wasn't given.
+
+---
+
+## Section 6 — Kubernetes
+
+**Progress:** Raw K8s manifests for the API/Streamlit app, plus Airflow deployed on Kubernetes via
+the official Helm chart with `KubernetesExecutor`, both verified on a real local `kind` cluster.
+
+**Decisions**
+- **Raw manifests for the app, not a Helm chart**: two straightforward Deployments/Services plus
+  one Ingress don't need templating — a chart would add a layer of indirection with no real payoff
+  here. `kustomization.yaml` ties them together for a single `kubectl apply -k`. Airflow, by
+  contrast, uses the official chart because writing a from-scratch scheduler/webserver/RBAC/DB-init
+  setup would be reinventing a well-maintained wheel for no benefit.
+- **`secret.example.yaml` + gitignored `secret.yaml`**, same pattern as `terraform.tfvars.example`
+  from section 5 — consistent placeholder-file convention across the repo for anything that needs
+  real credentials to run.
+- **DAGs baked into the Airflow image**, not git-sync or a PVC: `Dockerfile.airflow` now `COPY`s
+  `airflow/dags/` in addition to `etl/`/`utils/` (previously only available via docker-compose's
+  bind mount). This is the standard "immutable image" deployment pattern for the official chart
+  when you don't want a git-sync sidecar, and it doesn't change docker-compose's local-dev
+  behavior at all — the bind mount there still overlays the baked-in copy at container start, so
+  editing a DAG locally still doesn't need a rebuild.
+- **Airflow's metadata DB is a separate concern from the app's data warehouse** (RDS in section 5):
+  same split as the local docker-compose stack (`airflow-metadata` vs. `warehouse`, two different
+  Postgres instances/databases). Not conflated here either.
+- **Chart pinned to version `1.15.0`**, not the repo default: the unversioned chart now defaults to
+  targeting Airflow 3.x (renamed `webserver`→`api-server`, different config surface), which doesn't
+  match this project's `apache/airflow:2.9.3` image from section 4. `1.15.0` is the release whose
+  `appVersion` is exactly `2.9.3` (checked via `helm search repo apache-airflow/airflow --versions`
+  rather than guessing).
+- **`values-kind.yaml` vs `values-eks.yaml`**, mirroring `terraform/envs/localstack/` vs. the main
+  Terraform config: same chart, environment-specific overrides isolated into separate files rather
+  than one file trying to serve both with conditionals — image source, metadata DB, and IRSA
+  annotations differ between "disposable local smoke test" and "real cluster."
+- **Disabled Celery/Redis/Flower/statsd/triggerer** in both values files: `KubernetesExecutor`
+  launches one pod per task and has no use for a Celery worker fleet or its broker; statsd/flower
+  are optional and not needed to prove the executor works; triggerer is for deferrable operators,
+  which this DAG doesn't use. Keeps the local smoke-test footprint small and the values files
+  honest about what's actually being exercised.
+
+**Mistakes & Fixes**
+- First Airflow install used the Helm repo's default (unversioned/`latest`-resolving) chart, which
+  targeted Airflow 3.x — pods came up as `api-server`/`dag-processor` instead of the expected
+  `webserver`/`scheduler`, a structural mismatch with the 2.9.3 image, not something that could be
+  patched with a values tweak. Diagnosed by comparing the running pod names against what the chart
+  version should produce, then fixed by uninstalling and reinstalling pinned to `--version 1.15.0`.
+- The chart's bundled Postgres subchart failed with `ImagePullBackOff` on
+  `bitnami/postgresql:16.1.0-debian-11-r15` — Bitnami has since pulled that exact tag from Docker
+  Hub (confirmed via `kubectl describe pod`'s event log: `not found`, not a network/auth issue).
+  Fixed by dropping the bundled subchart entirely (`postgresql.enabled: false`) and standing up a
+  plain `postgres:16` Deployment/Service instead (`k8s/airflow/metadata-postgres.yaml`), pointed to
+  via the chart's `data.metadataConnection` values — same image this project already uses
+  everywhere else for Postgres, so no new moving part, just not the chart's default.
+- After fixing the DB, the DAG failed to load at all: `ModuleNotFoundError: No module named 'etl'`
+  from `airflow dags list-import-errors`. Root cause: docker-compose's Airflow services set
+  `PYTHONPATH=/opt/airflow` so `etl/` (copied to `/opt/airflow/etl`) is importable from a DAG file
+  under `/opt/airflow/dags/` — this env var was never carried over into the Helm values. Fixed by
+  adding it to both `values-kind.yaml` and `values-eks.yaml`'s `env:` list; re-ran
+  `airflow dags list` afterward and confirmed zero import errors before triggering anything.
+- (Not a mistake, but worth recording): task pods launched by the KubernetesExecutor are deleted
+  quickly after finishing, so `kubectl logs <pod>` raced the pod's own lifecycle and returned
+  `NotFound` — the pods had already been garbage-collected by the time I went to fetch their
+  stdout. Confirmed the launch happened anyway via `kubectl get events` (Scheduled → Pulled →
+  Created → Started, plus the task's own `up_for_retry` state with real start/end timestamps ~10s
+  apart) rather than needing the raw log output — good enough evidence that pods really launched,
+  ran, and failed at the connection step, not that they never ran at all.
+
+**Verification**
+- App: `kind create cluster` (with the ingress-ready node label + port mappings ingress-nginx's own
+  kind docs specify) + a real ingress-nginx controller install, waited for it to report `ready`.
+  Built and `kind load docker-image`'d the actual app image (already verified working in section
+  8's Prometheus/Grafana work, agent/ COPY fix included). `kubectl apply -k k8s/base/`: both
+  Deployments reached `available`; `curl http://localhost:8090/api/health` (through the real
+  Ingress, not a port-forward shortcut) returned `{"status":"ok"}`; `curl
+  http://localhost:8090/_stcore/health` returned `ok` for Streamlit.
+- Airflow: scheduler + webserver reached `Running`/`2/2` and `Running`/`1/1` respectively;
+  `airflow dags list` showed `datoscope_etl_dag` with no import errors; `airflow dags trigger`
+  produced a real queued run; `kubectl get events` confirmed the KubernetesExecutor created,
+  scheduled, and started real pods per task (not simulated) — the specific mechanism this todo item
+  claims. Task-level success was explicitly out of scope (no MinIO/warehouse in this cluster) and
+  documented as such rather than silently skipped.
+- Cleaned up afterward: DAG re-paused, `helm uninstall`, namespaces deleted, `kind delete cluster`
+  — no lingering local test infra, same hygiene as the LocalStack teardown in section 5.
+- EKS path: documented and reviewed against the real `terraform output` shapes from section 5, but
+  not applied — no EKS cluster exists and provisioning one has a real hourly cost that wasn't
+  authorized.

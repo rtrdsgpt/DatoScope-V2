@@ -1,0 +1,39 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: datoscope-streamlit
+  namespace: datoscope
+  labels:
+    app: datoscope-streamlit
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: datoscope-streamlit
+  template:
+    metadata:
+      labels:
+        app: datoscope-streamlit
+    spec:
+      containers:
+        - name: streamlit
+          image: datoscope-app:local
+          imagePullPolicy: IfNotPresent
+          command: ["streamlit", "run", "app.py", "--server.address", "0.0.0.0", "--server.port", "8501"]
+          ports:
+            - containerPort: 8501
+          envFrom:
+            - configMapRef:
+                name: datoscope-config
+          readinessProbe:
+            httpGet:
+              path: /_stcore/health
+              port: 8501
+            initialDelaySeconds: 5
+            periodSeconds: 5
+          livenessProbe:
+            httpGet:
+              path: /_stcore/health
+              port: 8501
+            initialDelaySeconds: 15
+            periodSeconds: 15

@@ -144,13 +144,31 @@ supersedes its scope with the additions below.
       defaults in `terraform/variables.tf` (`db.t4g.micro`, 20GB storage) rather than just a note.
 
 ## 6. Kubernetes
-- [ ] Deployment/Service/Ingress manifests (or a Helm chart) for the FastAPI backend and Streamlit
-      UI, with ConfigMaps for config and Secrets for credentials/API keys
-- [ ] Deploy **Airflow itself on Kubernetes** via the official Helm chart with the
+- [x] Deployment/Service/Ingress manifests for the FastAPI backend and Streamlit UI, with a
+      ConfigMap for config and a Secret for credentials/API keys — `k8s/base/` (raw manifests +
+      `kustomization.yaml`, not a Helm chart: simpler to verify directly for two straightforward
+      Deployments). Verified end-to-end on a real local `kind` cluster with a real ingress-nginx
+      controller: both pods `Running`/`Ready` on their real `/health` probes, and reached through
+      the actual Ingress (`curl` through the mapped host port, not just `kubectl get pods`) —
+      `curl localhost:8090/api/health` → `{"status":"ok"}`, `curl localhost:8090/_stcore/health` →
+      `ok`. Also fixed a genuine bug found while doing this: `Dockerfile.airflow` never baked in
+      `airflow/dags/`, so the DAG was only ever available via docker-compose's bind mount, not a
+      real standalone image — see log.md.
+- [x] Deploy **Airflow itself on Kubernetes** via the official Helm chart with the
       `KubernetesExecutor` — a stronger, more realistic data-engineering story than running
-      Airflow standalone, and reuses the DAG from section 1 as-is
-- [ ] Document both paths: `kind`/`minikube` for local/free demo, and the real EKS deploy path
+      Airflow standalone, and reuses the DAG from section 1 as-is — `k8s/airflow/`. Verified on the
+      same `kind` cluster: scheduler+webserver `Running`/`Ready`, the DAG loads with zero import
+      errors, and triggering it made the **KubernetesExecutor dynamically create real task pods**
+      (`datoscope-etl-dag-extract-*`, confirmed via `kubectl get events` — Scheduled → Pulled →
+      Created → Started) — the actual mechanism this item is about. The task itself then fails
+      (`up_for_retry`, expected: this kind cluster has no MinIO/warehouse deployed in it, out of
+      scope for this section — see k8s/README.md for the exact boundary of what's verified here
+      vs. section 1/3/4's job).
+- [x] Document both paths: `kind`/`minikube` for local/free demo, and the real EKS deploy path
       (using the Terraform + ECR images from section 5) for when you actually want to show it live
+      — `k8s/README.md`. EKS path is documented and reviewed for correctness against the real
+      Terraform outputs but not applied against a real cluster (none exists, and provisioning one
+      has a real hourly cost that wasn't authorized).
 
 ## 7. AI/agentic layer (the differentiator — not just "added MLOps to a student app")
 **Reordered ahead of sections 5–6 (AWS/Kubernetes)** at the user's request — no technical

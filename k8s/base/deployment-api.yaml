@@ -1,0 +1,41 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: datoscope-api
+  namespace: datoscope
+  labels:
+    app: datoscope-api
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: datoscope-api
+  template:
+    metadata:
+      labels:
+        app: datoscope-api
+    spec:
+      containers:
+        - name: api
+          image: datoscope-app:local
+          imagePullPolicy: IfNotPresent
+          command: ["uvicorn", "api.main:app", "--host", "0.0.0.0", "--port", "8000"]
+          ports:
+            - containerPort: 8000
+          envFrom:
+            - configMapRef:
+                name: datoscope-config
+            - secretRef:
+                name: datoscope-secrets
+          readinessProbe:
+            httpGet:
+              path: /health
+              port: 8000
+            initialDelaySeconds: 5
+            periodSeconds: 5
+          livenessProbe:
+            httpGet:
+              path: /health
+              port: 8000
+            initialDelaySeconds: 15
+            periodSeconds: 15

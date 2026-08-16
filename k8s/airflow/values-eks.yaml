@@ -1,0 +1,71 @@
+# Helm values for deploying Airflow to the real EKS cluster (section 5/6's
+# AWS path). Unlike values-kind.yaml, this expects the real ECR image and a
+# real external RDS database for Airflow's own metadata — not the bundled
+# Postgres subchart, and not the app's warehouse RDS instance either
+# (Airflow's metadata DB is a separate concern from the data warehouse, same
+# split as the local dev docker-compose stack). NOT yet applied against a
+# real EKS cluster — see log.md section 6 for what's been verified and what
+# hasn't; this is included so the CD workflow has something concrete to
+# `helm upgrade` against once a cluster exists, and reviewed for correctness
+# rather than left as a stub.
+executor: KubernetesExecutor
+
+images:
+  airflow:
+    repository: REPLACE_WITH_ECR_REPO_URL # from `terraform output ecr_repository_urls`
+    tag: REPLACE_WITH_IMAGE_TAG # set via --set at deploy time (e.g. the git SHA)
+    pullPolicy: IfNotPresent
+
+dags:
+  gitSync:
+    enabled: false
+  persistence:
+    enabled: false
+
+redis:
+  enabled: false
+workers:
+  replicas: 0
+flower:
+  enabled: false
+statsd:
+  enabled: false
+triggerer:
+  enabled: false
+
+webserver:
+  replicas: 1
+scheduler:
+  replicas: 1
+
+config:
+  core:
+    load_examples: "False"
+
+# Real RDS, not the bundled subchart — create a dedicated `airflow` database
+# on the same warehouse RDS instance (or a second instance) via Terraform,
+# and store the DSN in a K8s Secret referenced here rather than inline.
+postgresql:
+  enabled: false
+
+data:
+  metadataSecretName: datoscope-airflow-metadata-secret
+
+# The ETL DAG's own env (S3/warehouse) — point at the real S3 buckets from
+# `terraform output s3_bucket_names` and the real RDS warehouse endpoint,
+# via a Secret rather than plaintext (unlike values-kind.yaml's local test
+# values, which point at throwaway in-cluster/no-op targets).
+envFrom:
+  - secretRef:
+      name: datoscope-airflow-secrets
+
+env:
+  # Needed for `from etl... import ...` in the DAG — see values-kind.yaml.
+  - name: PYTHONPATH
+    value: "/opt/airflow"
+
+serviceAccount:
+  # Annotate for IRSA once terraform/modules/iam's etl role has a real
+  # eks_oidc_provider_arn/url — see terraform/variables.tf.
+  annotations: {}
+    # eks.amazonaws.com/role-arn: REPLACE_WITH_ETL_ROLE_ARN
