@@ -3,4 +3,10 @@ pytest>=8.0.0
 pytest-cov>=5.0.0
 moto[s3]>=5.0.0
 ruff>=0.5.0
-dvc[s3]>=3.50.0
+# Pinned exactly, not floored. An open `>=3.50.0` range makes pip explore the
+# whole dvc release history -- each version pulling a different flufl.lock
+# range -- until it gives up with `resolution-too-deep` (~20 min of backtracking
+# in CI). Nothing here imports dvc; it is a CLI tool for the model-artifact
+# workflow in scripts/05_export_production_model.py, so an exact pin costs
+# nothing and collapses the resolution.
+dvc[s3]==3.67.1
