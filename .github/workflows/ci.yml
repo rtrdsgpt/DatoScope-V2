@@ -44,10 +44,18 @@ jobs:
   #                      in-cluster pods, not CI)
   #   AWS_REGION       — matches terraform's aws_region variable
   #   EKS_CLUSTER_NAME — the EKS cluster name to deploy to
+  #
+  # Gated behind the repo variable ENABLE_CD ("true" to switch it on). No EKS
+  # cluster or AWS account is currently wired up, so without the gate this job
+  # fails at the OIDC step on every push to main and leaves the repo showing a
+  # red build for a deploy target that doesn't exist yet. Skipping is the
+  # honest state: the job is written and name-checked against sections 5/6,
+  # it just has nothing to deploy to. Set the variable (and the three secrets
+  # above) once a real cluster exists and it runs unchanged.
   cd:
     name: Build, push to ECR, deploy to EKS
     needs: lint-and-test
-    if: github.ref == 'refs/heads/main' && github.event_name == 'push'
+    if: vars.ENABLE_CD == 'true' && github.ref == 'refs/heads/main' && github.event_name == 'push'
     runs-on: ubuntu-latest
     permissions:
       id-token: write # required for aws-actions/configure-aws-credentials OIDC auth
